@@ -17,14 +17,14 @@ def parser():
             print(node)
 
 def test_ast():
-    module_path = Path("tests/sample_repo/data_loader.py")
-    parser = ASTParser(module_path, module_id="data_loader.py")
-    result = parser.parse()
+    project_path = Path("tests/sample_repo/")
+    parser = ASTParser(project_root=project_path)
+    nodes, edges= parser.parse()
 
-    for node in result["nodes"]:
+    for node in nodes:
         print("NODE:", node)
 
-    for edge in result["edges"]:
+    for edge in edges:
         print("EDGE:", edge)
 
 def visualize_graph():
@@ -67,9 +67,10 @@ def export():
     cypher_path = Path("graph_export.cypherl")
     export_to_cypher(graph, cypher_path)
 
+
 if __name__ == "__main__":
     
     # parser()
-    # test_ast()
-    visualize_graph()
+    test_ast()
+    # visualize_graph()
     # export()
