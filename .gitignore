@@ -1,3 +1,9 @@
 .vscode
+.env
 **/__pycache__/** 
+.DS_Store
+
+uploaded_repo/
 graph_export.cypherl
+
+tests/sample_repo.zip
