@@ -1,0 +1,26 @@
+[project]
+name = "code-graph-rag"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "chautuankien",email = "ctkiena2@gmail.com"}
+]
+readme = "README.md"
+requires-python = "^3.12"
+dependencies = [
+    "networkx (>=3.5,<4.0)",
+    "matplotlib (>=3.10.5,<4.0.0)",
+    "astpretty (>=3.0.0,<4.0.0)",
+    "langgraph (>=0.6.3,<0.7.0)",
+    "langchain (>=0.3.27,<0.4.0)",
+    "openai (>=1.99.1,<2.0.0)",
+    "python-dotenv (>=1.1.1,<2.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "code_graph_rag", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

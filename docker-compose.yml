@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  memgraph:
+    image: memgraph/memgraph-platform
+    container_name: memgraph
+    ports:
+      - "7687:7687"   # Bolt protocol (dùng cho Python, LangChain, LangGraph)
+      - "3000:3000"   # Memgraph Lab (Web UI)
+    volumes:
+      - memgraph-data:/var/lib/memgraph  # Lưu trữ dữ liệu nếu bạn muốn persist
+
+volumes:
+  memgraph-data:
