@@ -131,6 +131,10 @@ src/code_graph_rag/
 │   └── file_utils.py
 ├── parser/                         # AST parser
 │   └── ast_parser.py
+|── models/                         # NodeTypes and RelationshipTypes
+│   └── base.py
+│   └── nodes.py
+│   └── edges.py
 ├── graph/                          # Build & export graph
 │   ├── graph_builder.py
 │   └── exporter.py
