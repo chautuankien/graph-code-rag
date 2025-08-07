@@ -73,7 +73,7 @@ flowchart TD
 ### **Definition Relationships** (Code Structure)
 | Relationship | Source Node | Target Node(s) | Description | Example |
 |--------------|-------------|----------------|-------------|---------|
-| `DEFINES` | `Module` | `Class`, `Function` | Module contains class or function definition | `Module("user")` → `Class("User")` |
+| `DEFINES` | `Module`/ `Function` | `Class`, `Function` / `Function` | Module contains class or function definition | `Module("user")` → `Class("User")` |
 | `DEFINES_METHOD` | `Class` | `Method` | Class contains method definition | `Class("User")` → `Method("get_name")` |
 
 ### **Behavioral Relationships** (Code Interactions)

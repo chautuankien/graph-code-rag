@@ -159,6 +159,8 @@ class ASTParser():
                         target=mod_qname,         # Module uses qualified_name as identifier
                         type="CONTAINS_MODULE"
                     ))
+
+                    self._parse_module(file_path, mod_qname)
                 else:
                     # Create File node for non-Python files
                     file_node = FileNode(
@@ -175,3 +177,90 @@ class ASTParser():
                         type="CONTAINS_FILE"
                     ))
 
+    def _parse_module(self, module_path: Path, mod_qname: str):
+        with open(module_path, "r", encoding="utf-8") as f:
+            source = f.read()
+
+        try: 
+            tree = ast.parse(source)
+        except SyntaxError:
+            return
+        
+        # Context stack: track current ClassDef to distinguish function vs method
+        context_stack = []
+
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                self._handle_class(node, mod_qname, context_stack)
+            elif isinstance(node, ast.FunctionDef):
+                self._handle_function(node, mod_qname, context_stack)
+    
+    def _handle_class(self, node: ast.ClassDef, mod_qname: str, context_stack: list):
+        qualified_name = f"{mod_qname}.{node.name}"
+        decorators = [ast.unparse(d) for d in node.decorator_list]
+        docstring = ast.get_docstring(node)
+
+        class_node = ClassNode(
+            name=node.name,
+            qualified_name=qualified_name,
+            decorators=decorators,
+            start_line=node.lineno,
+            end_line=node.end_lineno if hasattr(node, "end_lineno") else node.lineno,
+            docstring=docstring,
+            parent=mod_qname
+        )
+
+        self.nodes.append(class_node)
+        self.edges.append(DefinesEdge(
+            source=mod_qname,
+            target=qualified_name,
+            type="DEFINES"
+        ))
+
+        # Detect method in a class
+        context_stack.append("class")
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.FunctionDef):
+                self._handle_function(child, qualified_name, context_stack)
+        context_stack.pop()
+    
+    def _handle_function(self, node: ast.FunctionDef, mod_or_class_qname: str, context_stack: list):
+        qualified_name = f"{mod_or_class_qname}.{node.name}"
+        decorators = [ast.unparse(d) for d in node.decorator_list]
+        docstring = ast.get_docstring(node)
+        params = [arg.arg for arg in node.args.args]
+        return_type = ast.unparse(node.returns) if node.returns else None
+
+        is_method = context_stack and context_stack[-1] == "class"
+        func_node = MethodNode if is_method else FunctionNode
+
+        func_obj = func_node(
+            name=node.name,
+            qualified_name=qualified_name,
+            decorators=decorators,
+            start_line=node.lineno,
+            end_line=node.end_lineno if hasattr(node, "end_lineno") else node.lineno,
+            docstring=docstring,
+            is_anonymous=False,
+            parent=mod_or_class_qname,
+            signature=f"{node.name}({', '.join(params)})",
+            parameters=params,
+            return_type=return_type
+        )
+        self.nodes.append(func_obj)
+        self.edges.append(DefinesEdge(
+            source=mod_or_class_qname,
+            target=qualified_name,
+            type="DEFINES_METHOD" if is_method else "DEFINES"
+        ))
+
+        # Detect sub-function in a nested function
+        context_stack.append("function")
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef):
+                self._handle_function(child, qualified_name, context_stack)
+        context_stack.pop()
+
+if __name__ == "__main__":
+    parser = ASTParser("tests/sample_repo/")
+    parser._parse_module("tests/sample_repo/tests/test_sample.py")
