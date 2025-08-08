@@ -7,7 +7,11 @@ class Calculator:
 
 def process_data():
     calc = Calculator()
-    calc.add(1, 2)  # should create CALLS edge: Function -> Method
+    # calc.add(1, 2)  # should create CALLS edge: Function -> Method
+
+def bar():
+    import datetime
+    dt = datetime.datetime()
 
 # Case 1: Function -> Function
 def helper_func():

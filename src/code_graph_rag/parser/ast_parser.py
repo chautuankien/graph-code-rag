@@ -20,6 +20,7 @@ class ASTParser():
 
         self.func_symbols = {}   # name → qualified_name
         self.method_symbols = {} # name → qualified_name
+        self.class_symbols = {}
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
@@ -203,6 +204,8 @@ class ASTParser():
         decorators = [ast.unparse(d) for d in node.decorator_list]
         docstring = ast.get_docstring(node)
 
+        self.class_symbols[node.name] = qualified_name
+
         class_node = ClassNode(
             name=node.name,
             qualified_name=qualified_name,
@@ -283,6 +286,9 @@ class ASTParser():
             elif name in self.method_symbols:
                 callee_qname = self.method_symbols[name]
                 callee_type = NodeType.METHOD
+            elif name in self.class_symbols:
+                callee_qname = self.class_symbols[name]
+                callee_type = NodeType.CONSTRUCTOR
             else:
                 callee_qname, callee_type = None, None
         # Case 2: gọi tới method qua self (self.method())
@@ -294,8 +300,14 @@ class ASTParser():
                     callee_qname = f"{current_class_or_func_qname}.{method_name}"
                     callee_type = NodeType.METHOD
                 else:   # case function -> class.method (process_data -> Calculator.add)
-                    callee_qname = None
-                    callee_type = NodeType.METHOD
+                    attr_name = node.func.attr  # tên phía sau dấu chấm
+                    if attr_name in self.class_symbols:
+                        # NẾU tên class phía sau thuộc local class (rất hiếm khi dùng import kiểu này), vẫn gán là constructor
+                        callee_qname = self.class_symbols[attr_name]
+                        callee_type = NodeType.CONSTRUCTOR
+                    else:
+                        # Không chắc chắn là constructor, gán là None
+                        callee_qname, callee_type = None, None
 
             else:
                 # Chưa xử lý (phase sau)
