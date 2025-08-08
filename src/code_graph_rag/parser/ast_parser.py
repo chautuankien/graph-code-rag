@@ -225,6 +225,23 @@ class ASTParser():
             type="DEFINES"
         ))
 
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                base_name = base.id
+                if base_name in self.class_symbols:
+                    target_qname = self.class_symbols[base_name]
+                else:
+                    target_qname = base_name
+            elif isinstance(base, ast.Attribute):
+                target_qname = ast.unparse(base)
+            else:
+                target_qname = ast.unparse(base)
+            self.edges.append(InheritsEdge(
+                source=qualified_name,
+                target=target_qname,
+                type="INHERITS"
+            ))
+
         # Detect method in a class
         context_stack.append("class")
         for child in ast.iter_child_nodes(node):
