@@ -1,5 +1,17 @@
 # Test cases for Phase 4.1: Function/Method <-> Method/Function
 
+import requests
+import numpy as np
+
+def foo():
+    x = requests.get("http://example.com")    # Function→External, callee_raw="requests.get", callee_type=EXTERNAL
+    y = np.array([1,2,3])                     # Function→External, callee_raw="np.array", callee_type=EXTERNAL
+
+class A:
+    def bar(self):
+        import pandas as pd
+        df = pd.DataFrame({"a": [1,2]}) 
+
 def foo():
     print("hello")   # CALLS: Function→Built-in, callee_raw=print, callee_type=BUILTIN
 

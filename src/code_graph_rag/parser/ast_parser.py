@@ -298,25 +298,22 @@ class ASTParser():
                 callee_qname, callee_type = None, None
         # Case 2: gọi tới method qua self (self.method())
         elif isinstance(node.func, ast.Attribute):
-            if isinstance(node.func.value, ast.Name):
-                if node.func.value.id == "self":
-                    method_name = node.func.attr
-                    # Trong context class, tìm method
-                    callee_qname = f"{current_class_or_func_qname}.{method_name}"
-                    callee_type = NodeType.METHOD
-                else:   # case function -> class.method (process_data -> Calculator.add)
-                    attr_name = node.func.attr  # tên phía sau dấu chấm
-                    if attr_name in self.class_symbols:
-                        # NẾU tên class phía sau thuộc local class (rất hiếm khi dùng import kiểu này), vẫn gán là constructor
-                        callee_qname = self.class_symbols[attr_name]
-                        callee_type = NodeType.CONSTRUCTOR
-                    else:
-                        # Không chắc chắn là constructor, gán là None
-                        callee_qname, callee_type = None, None
-
+            # Check self.method()
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
+                method_name = node.func.attr
+                callee_qname = f"{current_class_or_func_qname}.{method_name}"
+                callee_type = NodeType.METHOD
             else:
-                # Chưa xử lý (phase sau)
-                callee_qname, callee_type = None, None
+                # Không resolve được (không phải self.method), check external
+                attr_name = node.func.attr
+                # Nếu không phải class local
+                if attr_name in self.class_symbols:
+                    callee_qname = self.class_symbols[attr_name]
+                    callee_type = NodeType.CONSTRUCTOR
+                else:
+                    # External call
+                    callee_qname = ast.unparse(node.func)   # vd: "requests.get"
+                    callee_type = NodeType.EXTERNAL
         else:
             callee_qname, callee_type = None, None
         
