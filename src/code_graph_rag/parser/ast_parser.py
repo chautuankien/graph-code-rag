@@ -2,6 +2,7 @@ import os
 import ast
 from pathlib import Path
 from typing import Any
+import builtins
 
 from src.code_graph_rag.models.nodes import *
 from src.code_graph_rag.models.edges import *
@@ -21,6 +22,7 @@ class ASTParser():
         self.func_symbols = {}   # name → qualified_name
         self.method_symbols = {} # name → qualified_name
         self.class_symbols = {}
+        self.builtin_funcs = set(dir(builtins))
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
@@ -289,6 +291,9 @@ class ASTParser():
             elif name in self.class_symbols:
                 callee_qname = self.class_symbols[name]
                 callee_type = NodeType.CONSTRUCTOR
+            elif name in self.builtin_funcs:
+                callee_qname = None 
+                callee_type = NodeType.BUILTIN
             else:
                 callee_qname, callee_type = None, None
         # Case 2: gọi tới method qua self (self.method())
