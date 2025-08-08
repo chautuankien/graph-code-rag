@@ -17,7 +17,7 @@ def parser():
             print(node)
 
 def test_ast():
-    project_path = Path("tests/inherits_edge_test")
+    project_path = Path("tests/overrides_edge_test")
     parser = ASTParser(project_root=project_path)
     nodes, edges= parser.parse()
 

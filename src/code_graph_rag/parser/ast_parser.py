@@ -23,10 +23,14 @@ class ASTParser():
         self.method_symbols = {} # name → qualified_name
         self.class_symbols = {}
         self.builtin_funcs = set(dir(builtins))
+
+        self.class_method_symbols = {}  # {class_qname: {method_name: method_qualified_name}}
+        self.class_bases = {}          # {class_qname: [base_class_target]}
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
         self._walk_files_and_dirs()
+        self._handle_overrides()
         return self.nodes, self.edges
     
     def _walk_files_and_dirs(self):
@@ -225,6 +229,8 @@ class ASTParser():
             type="DEFINES"
         ))
 
+        # Detect inherit edge
+        bases = []
         for base in node.bases:
             if isinstance(base, ast.Name):
                 base_name = base.id
@@ -241,6 +247,11 @@ class ASTParser():
                 target=target_qname,
                 type="INHERITS"
             ))
+            bases.append(target_qname)
+        self.class_bases[qualified_name] = bases  # Lưu lại base class
+
+        # Tạo bảng method cho class này
+        self.class_method_symbols[qualified_name] = {}
 
         # Detect method in a class
         context_stack.append("class")
@@ -281,6 +292,9 @@ class ASTParser():
 
         if is_method:
             self.method_symbols[node.name] = qualified_name
+            # Ghi lại method cho class này
+            if mod_or_class_qname in self.class_method_symbols:
+                self.class_method_symbols[mod_or_class_qname][node.name] = qualified_name
         else:
             self.func_symbols[node.name] = qualified_name
         
@@ -343,6 +357,29 @@ class ASTParser():
             callee_type=callee_type,
             callee_raw=callee_raw
         ))
+    
+    def _handle_overrides(self):
+        """
+        Sau khi đã parse xong toàn bộ class/method, phát hiện các OVERRIDES edge.
+        """
+        # Duyệt từng class
+        for class_qname, bases in self.class_bases.items():
+            # Duyệt từng method trong class đó
+            method_map = self.class_method_symbols.get(class_qname, {})
+            for method_name, method_qname in method_map.items():
+                # Duyệt từng base class của class này
+                for base in bases:
+                    # Nếu base là class internal, kiểm tra method trong đó
+                    base_method_map = self.class_method_symbols.get(base, {})
+                    base_method_qname = base_method_map.get(method_name)
+                    if base_method_qname:
+                        # Có method trùng tên ở base class, tạo OVERRIDES edge
+                        self.edges.append(OverridesEdge(
+                            source=method_qname,
+                            target=base_method_qname,
+                            type="OVERRIDES"
+                        ))
+                    # Nếu base là external (tên raw string), skip
         
 
 if __name__ == "__main__":
