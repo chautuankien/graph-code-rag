@@ -17,12 +17,12 @@ def parser():
             print(node)
 
 def test_ast():
-    project_path = Path("tests/sample_repo/")
+    project_path = Path("tests/calls_edge_test")
     parser = ASTParser(project_root=project_path)
     nodes, edges= parser.parse()
 
-    for node in nodes:
-        print("NODE:", node)
+    # for node in nodes:
+        # print("NODE:", node)
 
     for edge in edges:
         print("EDGE:", edge)

@@ -17,6 +17,9 @@ class ASTParser():
         # This mapping is essential for establishing correct parent-child relationships
         # because packages use qualified_name as identifier while folders use path
         self.folder_qname_map = {}
+
+        self.func_symbols = {}   # name → qualified_name
+        self.method_symbols = {} # name → qualified_name
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
@@ -189,7 +192,7 @@ class ASTParser():
         # Context stack: track current ClassDef to distinguish function vs method
         context_stack = []
 
-        for node in tree.body:
+        for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
                 self._handle_class(node, mod_qname, context_stack)
             elif isinstance(node, ast.FunctionDef):
@@ -254,12 +257,62 @@ class ASTParser():
             type="DEFINES_METHOD" if is_method else "DEFINES"
         ))
 
+        if is_method:
+            self.method_symbols[node.name] = qualified_name
+        else:
+            self.func_symbols[node.name] = qualified_name
+        
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                self._handle_call(child, qualified_name, is_method) 
+
         # Detect sub-function in a nested function
         context_stack.append("function")
         for child in node.body:
             if isinstance(child, ast.FunctionDef):
                 self._handle_function(child, qualified_name, context_stack)
         context_stack.pop()
+    
+    def _handle_call(self, node: ast.Call, current_class_or_func_qname: str, is_method: bool):
+        callee_raw = ast.unparse(node.func)
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name in self.func_symbols:
+                callee_qname = self.func_symbols[name]
+                callee_type = NodeType.FUNCTION
+            elif name in self.method_symbols:
+                callee_qname = self.method_symbols[name]
+                callee_type = NodeType.METHOD
+            else:
+                callee_qname, callee_type = None, None
+        # Case 2: gọi tới method qua self (self.method())
+        elif isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name):
+                if node.func.value.id == "self":
+                    method_name = node.func.attr
+                    # Trong context class, tìm method
+                    callee_qname = f"{current_class_or_func_qname}.{method_name}"
+                    callee_type = NodeType.METHOD
+                else:   # case function -> class.method (process_data -> Calculator.add)
+                    callee_qname = None
+                    callee_type = NodeType.METHOD
+
+            else:
+                # Chưa xử lý (phase sau)
+                callee_qname, callee_type = None, None
+        else:
+            callee_qname, callee_type = None, None
+        
+                    # Tạo CallsEdge
+        self.edges.append(CallsEdge(
+            source=current_class_or_func_qname,
+            target=callee_qname,
+            type="CALLS",
+            caller_type=NodeType.METHOD if is_method else NodeType.FUNCTION,
+            callee_type=callee_type,
+            callee_raw=callee_raw
+        ))
+        
 
 if __name__ == "__main__":
     parser = ASTParser("tests/sample_repo/")
