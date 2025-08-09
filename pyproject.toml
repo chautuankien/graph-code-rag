@@ -17,11 +17,16 @@ dependencies = [
     "pydantic (>=2.11.7,<3.0.0)",
     "langchain-openai (>=0.3.28,<0.4.0)",
     "pymgclient (>=1.4.0,<2.0.0)",
-    "streamlit (>=1.48.0,<2.0.0)"
+    "streamlit (>=1.48.0,<2.0.0)",
+    "pytest (>=8.4.1,<9.0.0)"
 ]
 
 [tool.poetry]
 packages = [{include = "code_graph_rag", from = "src"}]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
 
 
 [build-system]
