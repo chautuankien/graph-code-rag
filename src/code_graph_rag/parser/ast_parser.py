@@ -19,6 +19,8 @@ class ASTParser():
         # because packages use qualified_name as identifier while folders use path
         self.folder_qname_map = {}
 
+        self.module_symbols = {}
+        self.import_map = {}
         self.func_symbols = {}   # name → qualified_name
         self.method_symbols = {} # name → qualified_name
         self.class_symbols = {}
@@ -156,6 +158,8 @@ class ASTParser():
                     # Include project name in qualified name for global uniqueness
                     mod_qname = ".".join([self.project_root.name] + list(rel_file_path.with_suffix('').parts))
                     
+                    self.module_symbols[mod_qname] = mod_qname
+
                     module_node = ModuleNode(
                         qualified_name=mod_qname,      # Unique qualified name
                         name=file,                     # Filename with extension
@@ -196,6 +200,9 @@ class ASTParser():
         except SyntaxError:
             return
         
+        # Handle imports first to ensure all symbols are registered
+        self._handle_imports(tree, mod_qname)
+
         # Context stack: track current ClassDef to distinguish function vs method
         context_stack = []
 
@@ -205,6 +212,89 @@ class ASTParser():
             elif isinstance(node, ast.FunctionDef):
                 self._handle_function(node, mod_qname, context_stack)
     
+    def _handle_imports(self, tree: ast.AST, mod_qname: str):
+        """
+        Parse top-level import statements in a module and emit IMPORTS edges.
+
+        Parameters:
+            tree (ast.AST): Parsed AST of the current module.
+            mod_qname (str): Qualified name of the current module (e.g., "proj.pkg.mod").
+
+        Behavior:
+        - Handles two forms:
+          A) `import x [as y]`:
+             - Records alias → target in self.import_map.
+             - Emits ImportsEdge(source=mod_qname, target=x, import_name=x).
+          B) `from pkg.mod import name [as alias]` (including relative imports with leading dots):
+             - Resolves the base module for relative imports using node.level.
+             - Builds a normalized import_name (e.g., "pkg.mod.name" or just "pkg.mod" for "*").
+             - Records alias → target in self.import_map.
+             - Emits ImportsEdge(source=mod_qname, target=import_name, import_name=import_name).
+
+        Notes:
+        - Internal modules already discovered are stored in self.module_symbols.
+          If an import points to an internal module, target_qname equals that qualified name.
+          Otherwise, the raw dotted string is kept (treated as external or unresolved).
+        - node.level indicates the number of leading dots in relative imports.
+          Example: from ..utils import helper (level=2).
+        """
+        for node in tree.body:  # Iterate over top-level statements in the module
+            # -------- Case A: `import foo [as bar]` --------
+            if isinstance(node, ast.Import):  # Handle absolute imports like `import os` or `import pkg.mod`
+                for alias in node.names:  # Multiple names can be imported in one statement
+                    # raw module name
+                    full_name = alias.name            # e.g. "os" or "mypkg.sub"
+                    alias_name = alias.asname or alias.name  # Use alias if provided; otherwise the original name
+                    # resolve target: is it internal?
+                    if full_name in self.module_symbols:
+                        target_qname = full_name     # Internal module already known by its qualified name
+                    else:
+                        target_qname = full_name     # External/unknown for now — keep raw dotted path
+                    # record alias → target for later resolution
+                    self.import_map[alias_name] = target_qname  # Map imported symbol/alias to its resolved target
+                    # emit edge
+                    self.edges.append(ImportsEdge(
+                        source=mod_qname,            # The module performing the import
+                        target=target_qname,         # The module/symbol being imported (internal or raw)
+                        type="IMPORTS",              # Relationship label
+                        import_name=full_name        # Textual module path as written in code
+                    ))
+
+            # ----- Case B: `from pkg.mod import name [as alias]` -----
+            elif isinstance(node, ast.ImportFrom):  # Handle `from ... import ...` forms (supports relative imports)
+                module_part = node.module or ""  # Base specified after `from`; empty for `from . import X`
+                # compute base qname for relative imports
+                if node.level > 0:  # node.level counts leading dots in `from ....` (number of package levels to go up)
+                    # base_parts = mod_qname.split('.')[:-node.level]  # Strip `level` trailing parts from current module qname
+                    base_parts = mod_qname.split('.')
+                    module_part = '.'.join(base_parts + ([module_part] if module_part else []))  # Append explicit module if present
+                for alias in node.names:  # Each imported name (could be multiple, or a wildcard "*")
+                    name_part = alias.name          # e.g. "helper" or "*"
+                    alias_name = alias.asname or name_part  # Use alias if present; otherwise the imported name
+                    
+                    # full import string + target resolution (preserve base module as target for wildcard)
+                    if name_part == "*":
+                        import_name = f"{module_part}.*"   # desired textual form for wildcard
+                        target_base = module_part          # keep target as the base module
+                    else:
+                        import_name = f"{module_part}.{name_part}"
+                        target_base = module_part
+
+                    # resolve target qname
+                    if import_name in self.module_symbols:
+                        target_qname = target_base   # Internal module/symbol already known
+                    else:
+                        target_qname = target_base   # External/unknown — keep normalized dotted path
+                    # update import_map
+                    self.import_map[alias_name] = target_qname  # Map alias/name → resolved target
+                    # emit edge
+                    self.edges.append(ImportsEdge(
+                        source=mod_qname,           # The module performing the import
+                        target=target_qname,        # The resolved module/symbol name
+                        type="IMPORTS",             # Relationship label
+                        import_name=import_name     # Normalized textual import path
+                    ))
+
     def _handle_class(self, node: ast.ClassDef, mod_qname: str, context_stack: list):
         qualified_name = f"{mod_qname}.{node.name}"
         decorators = [ast.unparse(d) for d in node.decorator_list]
@@ -230,28 +320,7 @@ class ASTParser():
         ))
 
         # Detect inherit edge
-        bases = []
-        for base in node.bases:
-            if isinstance(base, ast.Name):
-                base_name = base.id
-                if base_name in self.class_symbols:
-                    target_qname = self.class_symbols[base_name]
-                else:
-                    target_qname = base_name
-            elif isinstance(base, ast.Attribute):
-                target_qname = ast.unparse(base)
-            else:
-                target_qname = ast.unparse(base)
-            self.edges.append(InheritsEdge(
-                source=qualified_name,
-                target=target_qname,
-                type="INHERITS"
-            ))
-            bases.append(target_qname)
-        self.class_bases[qualified_name] = bases  # Lưu lại base class
-
-        # Tạo bảng method cho class này
-        self.class_method_symbols[qualified_name] = {}
+        self._handle_inherits(node, qualified_name)
 
         # Detect method in a class
         context_stack.append("class")
@@ -358,6 +427,31 @@ class ASTParser():
             callee_raw=callee_raw
         ))
     
+    def _handle_inherits(self, node: ast.ClassDef, class_qname: str):
+        # Detect inherit edge
+        bases = []
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                base_name = base.id
+                if base_name in self.class_symbols:
+                    target_qname = self.class_symbols[base_name]
+                else:
+                    target_qname = base_name
+            elif isinstance(base, ast.Attribute):
+                target_qname = ast.unparse(base)
+            else:
+                target_qname = ast.unparse(base)
+            self.edges.append(InheritsEdge(
+                source=class_qname,
+                target=target_qname,
+                type="INHERITS"
+            ))
+            bases.append(target_qname)
+        self.class_bases[class_qname] = bases  # Lưu lại base class
+
+        # Tạo bảng method cho class này
+        self.class_method_symbols[class_qname] = {}
+
     def _handle_overrides(self):
         """
         Sau khi đã parse xong toàn bộ class/method, phát hiện các OVERRIDES edge.
