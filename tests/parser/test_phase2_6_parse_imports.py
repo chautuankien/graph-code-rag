@@ -1,5 +1,3 @@
-import sys
-print(sys.path)
 import pytest
 from src.code_graph_rag.models.edges import ImportsEdge
 from src.code_graph_rag.parser.ast_parser import ASTParser

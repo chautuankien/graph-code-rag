@@ -1,8 +1,10 @@
 import os
 import ast
+import re
 from pathlib import Path
-from typing import Any
 import builtins
+import tomllib
+import glob
 
 from src.code_graph_rag.models.nodes import *
 from src.code_graph_rag.models.edges import *
@@ -10,6 +12,8 @@ from src.code_graph_rag.models.edges import *
 class ASTParser():
     def __init__(self, project_root: str):
         self.project_root = Path(project_root).resolve()
+        self.project_name = self.project_root.name  # Name of the project root directory
+
         self.nodes = []
         self.edges = []
         # Maps folder paths to their qualified names when they are Python packages
@@ -28,10 +32,14 @@ class ASTParser():
 
         self.class_method_symbols = {}  # {class_qname: {method_name: method_qualified_name}}
         self.class_bases = {}          # {class_qname: [base_class_target]}
+
+        # External packages cache: normalized_name -> ExternalPackageNode
+        self.external_packages: dict[str, ExternalPackageNode] = {}
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
         self._walk_files_and_dirs()
+        self._parse_dependencies_from_manifest()
         self._handle_overrides()
         return self.nodes, self.edges
     
@@ -190,6 +198,181 @@ class ASTParser():
                         target=str(rel_file_path),     # File uses path as identifier
                         type="CONTAINS_FILE"
                     ))
+
+    def _parse_dependencies_from_manifest(self):
+        """
+        Discover declared external dependencies from project manifest files
+        (prefer `pyproject.toml`, fall back to `requirements*.txt`) and
+        materialize them into the graph as:
+        1) ExternalPackageNode(name=<normalized>, version_spec=<constraint>)
+        2) Project-level edges: ProjectNode --DEPENDS_ON_EXTERNAL--> ExternalPackageNode
+
+        Why this method exists
+        ----------------------
+        - “ImportsEdge” found in source files tell us which *modules* are used,
+        but they don’t tell us the *declared* dependency list nor version constraints.
+        - The manifest is the source of truth for declared packages and versions.
+        - We emit **Project → DEPENDS_ON_EXTERNAL** edges for the whole project to capture
+        declared intent, independent of which modules import what.
+
+        What counts as a dependency
+        ---------------------------
+        - `pyproject.toml`:
+            * PEP 621: `[project].dependencies` (list of strings)
+            * Optional deps: `[project.optional-dependencies]` (dict of lists)
+            * Poetry: `[tool.poetry.dependencies]` (dict; ignore `"python"`)
+            * Poetry groups (optional): `[tool.poetry.group.*.dependencies]` (dict)
+        If `pyproject.toml` exists, it is preferred and we do not look at `requirements*.txt`
+        unless you want to merge (this implementation *does* merge if both exist).
+        - `requirements*.txt` (fallback or merge):
+            * Each non-empty, non-comment line is parsed via `_split_req_line()`.
+
+        Idempotency & deduplication
+        ---------------------------
+        - `_upsert_external_package()` guarantees one node per normalized package name and
+        upgrades `version_spec` when we learn more (e.g., from manifest).
+        - We deduplicate **Project-level** DEPENDS_ON_EXTERNAL edges by checking existing edges
+        where `source == self.project_name`.
+
+        Side effects
+        ------------
+        - Appends new ExternalPackageNode objects to `self.nodes` (only on first sight).
+        - Appends new Project-level DependsOnExternalEdge objects to `self.edges`
+        (only if not already present).
+        - Safe to call multiple times.
+
+        Examples
+        --------
+        pyproject.toml (PEP 621):
+            [project]
+            dependencies = [
+                "requests>=2.31,<3",
+                "pydantic>=2",
+            ]
+
+        requirements.txt:
+            numpy
+            pandas>=2.1,<3  # pinned range
+
+        Both inputs will produce ExternalPackageNode("requests", ">=2.31,<3"), etc.,
+        and ProjectNode("proj") --DEPENDS_ON_EXTERNAL--> ExternalPackageNode("requests").
+        """
+        # Collect all dependencies we discover into a temporary dict:
+        #   normalized_package_name -> version_spec (string, possibly empty)
+        # If the same package is found multiple times, last one wins (which is fine;
+        # `_upsert_external_package` merges/keeps the most informative spec).
+        discovered: dict[str, str] = {}
+
+        # Utility to add a (name, spec) into the `discovered` dict consistently:
+        def _record_dep(raw_name: str, spec: str) -> None:
+            if not raw_name:
+                return
+            # We do *not* normalize here; let _upsert_external_package() do normalization
+            # so that all normalization rules remain in one place.
+            # However, for dict keying we *do* want stable keys; use the same normalization
+            # as the node creation to avoid duplicate inserts in this local dict.
+            norm = self._norm_pkg_name(raw_name)
+            # Prefer non-empty spec if we already recorded an empty one earlier.
+            if norm in discovered:
+                if not discovered[norm] and spec:
+                    discovered[norm] = spec
+            else:
+                discovered[norm] = spec or ""
+
+        # ----------------------------------------------------------
+        # 1) Parse pyproject.toml if present (preferred information)
+        # ----------------------------------------------------------
+    
+        pyproject = Path(self.project_root) / "pyproject.toml"
+        if pyproject.exists():
+            try:
+                data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+
+            # PEP 621: [project].dependencies (list of strings)
+            for item in (data.get("project", {}) or {}).get("dependencies", []) or []:
+                result = self._split_req_line(item)
+                if result:
+                    name, spec = result
+                    _record_dep(name, spec)
+            
+            # PEP 621 optional dependencies: [project.optional-dependencies]
+            # Structure: { "extra_name": ["pkg1", "pkg2>=1", ...], ... }
+            opt_deps = (data.get("project", {}) or {}).get("optional-dependencies", {}) or {}
+            for _extra, lines in opt_deps.items():
+                for item in lines or []:
+                    result = self._split_req_line(item)
+                    if result:
+                        name, spec = result
+                        _record_dep(name, spec)
+            
+            # Poetry: [tool.poetry.dependencies]  (dict: name -> spec or table)
+            poetry_deps = (data.get("tool", {}) or {}).get("poetry", {}).get("dependencies", {}) or {}
+            for name, spec in poetry_deps.items():
+                if str(name).lower() == "python":
+                    continue  # Not a distribution; it's the interpreter constraint.
+                # Poetry can express version as a string or as a table with `version` field.
+                if isinstance(spec, str):
+                    _record_dep(name, spec)
+                elif isinstance(spec, dict):
+                    _record_dep(name, spec.get("version", ""))
+                
+            # Poetry groups (optional): [tool.poetry.group.<grp>.dependencies]
+            poetry_groups = (data.get("tool", {}) or {}).get("poetry", {}).get("group", {}) or {}
+            for _grp, section in poetry_groups.items():
+                group_deps = (section or {}).get("dependencies", {}) or {}
+                for name, spec in group_deps.items():
+                    if isinstance(spec, str):
+                        _record_dep(name, spec)
+                    elif isinstance(spec, dict):
+                        _record_dep(name, spec.get("version", ""))
+            
+        # ----------------------------------------------------------------
+        # 2) requirements*.txt fallback/merge (only if files actually exist)
+        # ----------------------------------------------------------------
+        # If we haven't discovered any dependencies yet, fall back to requirements files.
+        if not discovered:
+            req_glob = str(Path(self.project_root) / "requirements*.txt")
+            for req_path in glob.glob(req_glob):
+                try:
+                    with open(req_path, "r", encoding="utf-8") as f:
+                        for raw_line in f:
+                            result = self._split_req_line(raw_line)
+                            if not result:
+                                continue
+                            name, spec = result
+                            _record_dep(name, spec)
+                except OSError:
+                    # Non-fatal: skip unreadable files
+                    continue
+
+        # ----------------------------------------------------------------------
+        # 3) Upsert nodes and emit Project-level DEPENDS_ON_EXTERNAL edges (dedup)
+        # ----------------------------------------------------------------------
+        # Build a set of already-emitted project-level dependencies to avoid duplicates,
+        # while leaving module-level edges untouched.
+        already_emitted = {
+            e.target
+            for e in self.edges
+            if getattr(e, "type", None) == "DEPENDS_ON_EXTERNAL"
+            and getattr(e, "source", None) == self.project_name
+        }
+
+        for norm_pkg, spec in discovered.items():
+            # Ensure there is a node for this package (create or update version_spec).
+            node = self._upsert_external_package(norm_pkg, spec)
+
+            # Emit Project → DEPENDS_ON_EXTERNAL only once per package.
+            if node.name not in already_emitted:
+                self.edges.append(
+                    DependsOnExternalEdge(
+                        source=self.project_name,  # Project node identifier
+                        target=node.name,          # External package node name (normalized)
+                        type="DEPENDS_ON_EXTERNAL"
+                    )
+                )
+                already_emitted.add(node.name)
 
     def _parse_module(self, module_path: Path, mod_qname: str):
         with open(module_path, "r", encoding="utf-8") as f:
@@ -475,6 +658,138 @@ class ASTParser():
                         ))
                     # Nếu base là external (tên raw string), skip
         
+    @staticmethod
+    def _split_req_line(line: str) -> tuple[str, str] | None:
+        """
+        Parse a single requirement spec line into (package_name, version_spec).
+
+        This function is intentionally robust for common requirement formats found in
+        pyproject/requirements files. It supports:
+          - Simple pins:        "requests==2.31.0"
+          - Ranges:             "pandas>=2.1,<3"
+          - No version:         "numpy"
+          - Extras:             "uvicorn[standard]>=0.27"
+          - Env markers:        "Pillow>=10 ; python_version >= '3.10'"
+          - Inline comments:    "PyYAML>=6.0  # for config"
+          - Editable/VCS lines: "-e git+https://...#egg=package"  (returns ("package",""))
+
+        Returns:
+            (name, spec) if a package name can be extracted, otherwise None for
+            lines that are empty, comment-only, or unsupported.
+
+        Notes:
+            - The returned name is *raw* (not PEP 503 normalized). Normalization
+              should be applied by the caller (e.g., inside _upsert_external_package).
+            - The spec is returned exactly as it appears after the operator
+              (e.g., ">=2.1,<3"). If no version is present, spec = "".
+        """
+        if not line:
+            return None
+        
+        s = line.strip()
+        if not s or s.startswith("#"):
+            return None
+        
+        # Drop inline comments: "pkg>=1  # comment" -> "pkg>=1"
+        if "#" in s:
+            s = s.split("#", 1)[0].strip()
+        if not s:
+            return None
+        
+        # Drop environment markers: "pkg>=1 ; python_version >= '3.10'"
+        if ";" in s:
+            s = s.split(";", 1)[0].strip()
+        if not s:
+            return None
+        
+        # Handle editable/VCS lines (best-effort):
+        #   -e git+...#egg=package
+        #   git+...#egg=package
+        editable_prefixes = ("-e ", "--editable ")
+        if s.startswith(editable_prefixes) or s.startswith("git+"):
+            m = re.search(r"[#&]egg=([A-Za-z0-9_.\-]+)", s)
+            if m:
+                return m.group(1), ""
+            # If we cannot extract a name, skip this line silently
+            return None
+        
+        # Strip extras: "uvicorn[standard]" -> "uvicorn"
+        # We only drop the extras segment; the version part (if any) follows after.
+        # We find the first version operator and split before it; extras are removed from the name part.
+        # Supported operators (ordered by length so longer ones match first).
+        operators = ("==", ">=", "<=", ">", "<", "~=", "!=")
+        op_pos = len(s)
+        op_used = None
+        for op in operators:
+            pos = s.find(op)
+            if pos != -1 and pos < op_pos:
+                op_pos, op_used = pos, op
+        
+        if op_used is None:
+            # No version operator found: entire string is the package token (possibly with extras)
+            name_part = s
+            spec_part = ""
+
+        else:
+            name_part = s[:op_pos].rstrip()
+            spec_part = s[op_pos:].strip()  # keep the operator and everything after
+        
+        # Remove extras from the name part: "pkg[foo,bar]" -> "pkg"
+        if "[" in name_part:
+            name_part = name_part.split("[", 1)[0].strip()
+        
+        # Empty name → skip
+        if not name_part:
+            return None
+
+        return name_part, spec_part
+
+    @staticmethod
+    def _norm_pkg_name(name: str) -> str:
+        """
+        Normalize a distribution name per PEP 503:
+          - lowercase
+          - collapse runs of -, _, . into single '-'
+        This guarantees that different spellings of the same distribution map to one key.
+        """
+        name = name.strip().lower()
+        return re.sub(r"[-_.]+", "-", name)
+
+    def _upsert_external_package(self, pkg_name: str, version_spec: str | None = "") -> ExternalPackageNode:
+        """
+        Create or update an ExternalPackageNode in the parser's state.
+
+        This method ensures:
+          1) We only ever keep one node per *normalized* package name.
+          2) If a node already exists with empty version_spec and we now have a non-empty
+             version_spec (e.g., discovered from pyproject.toml), we update the node in-place.
+          3) The node is appended to `self.nodes` only on first creation (no duplicates).
+
+        Args:
+            pkg_name:     A raw distribution name as it appears in import/manifest (e.g., "Pillow", "cv2").
+            version_spec: The version constraint string (e.g., ">=2.31,<3"). If unknown, pass "".
+
+        Returns:
+            The ExternalPackageNode instance representing this distribution.
+        """
+
+        # Normalize the name so that "PyYAML", "pyyaml", "yaml" (after mapping) merge consistently.
+        norm = self._norm_pkg_name(pkg_name)
+        node = self.external_packages.get(norm)
+
+        if node is None:
+            # First time we see this package → create the node and cache it.
+            node = ExternalPackageNode(name=norm, version_spec=version_spec or "")
+            self.external_packages[norm] = node
+            self.nodes.append(node)
+            return node
+
+        # Node already exists: upgrade version_spec if previously unknown/empty.
+        if not getattr(node, "version_spec", "") and version_spec:
+            node.version_spec = version_spec
+
+        return node
+
 
 if __name__ == "__main__":
     parser = ASTParser("tests/sample_repo/")
