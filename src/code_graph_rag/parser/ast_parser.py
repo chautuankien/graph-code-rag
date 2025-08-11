@@ -12,11 +12,68 @@ from src.code_graph_rag.models.edges import *
 
 class ASTParser():
     def __init__(self, project_root: str):
+        """
+        Initialize a new ASTParser for a given codebase root.
+
+        Parameters
+        ----------
+        project_root : str
+            Path to the repository or project directory to analyze. 
+
+        Attributes initialized
+        ----------------------
+        project_root : pathlib.Path
+            Absolute path to the project root (anchor for walking and relative paths).
+        project_name : str
+            Name of the project, taken from the root directory's basename. Used as a
+            stable prefix for qualified names (qnames) to ensure global uniqueness.
+        nodes : list[BaseNode]
+            Collector for all node objects created by the parser (Project, Folder,
+            Package, Module, Class, Function, Method, ExternalPackage).
+        edges : list[BaseEdge]
+            Collector for all relationship objects (CONTAINS_*, DEFINES(_METHOD),
+            CALLS, IMPORTS, INHERITS, OVERRIDES, DEPENDS_ON_EXTERNAL).
+        folder_qname_map : dict[str, str]
+            Maps a folder path (relative to project root, e.g., "src/models")
+            to its package qualified_name if it is a Python package (has __init__.py).
+            This ensures correct parent-child relationships when building CONTAINS_* edges:
+            - Packages use qualified_name identifiers
+            - Folders use path identifiers
+        module_symbols : dict[str, str]
+            Registry of internal modules discovered during filesystem walk.
+            Key and value are the module's qualified name for quick membership checks.
+        import_map : dict[str, str]
+            Per-parser alias resolution map for imports (alias → resolved target).
+            Populated in _handle_imports and used for later call resolution phases.
+        func_symbols : dict[str, str]
+            Global function symbol table: function_name → function_qualified_name.
+            Filled when encountering FunctionDef outside class scopes (also nested functions).
+        method_symbols : dict[str, str]
+            Global method symbol table: method_name → method_qualified_name.
+            Filled when encountering FunctionDef inside class scopes.
+        class_symbols : dict[str, str]
+            Class symbol table: class_name → class_qualified_name.
+        builtin_funcs : set[str]
+            Snapshot of Python builtins (dir(builtins)) for quick detection of built-in calls.
+        class_method_symbols : dict[str, dict[str, str]]
+            Per-class method tables: class_qname → { method_name: method_qname }.
+            Enables later detection of OVERRIDES across inheritance hierarchies.
+        class_bases : dict[str, list[str]]
+            Per-class base list: class_qname → [base_target, ...]. Targets may be internal
+            qnames or raw dotted names if unresolved/external.
+        external_packages : dict[str, ExternalPackageNode]
+            Cache of ExternalPackageNode objects keyed by normalized (PEP 503) package name.
+            Ensures idempotent creation and later version_spec upgrades.
+        mod_to_external_used : dict[str, set[str]]
+            Tracks module-level external usage: module_qname → set(normalized_pkg_names).
+            Prevents duplicate module → DEPENDS_ON_EXTERNAL edges.
+        """
         self.project_root = Path(project_root).resolve()
         self.project_name = self.project_root.name  # Name of the project root directory
 
-        self.nodes = []
-        self.edges = []
+        self.nodes = [] # Accumulator for all node instances the parser discovers/emits
+        self.edges = [] # Accumulator for all edge instances the parser discovers/emits
+
         # Maps folder paths to their qualified names when they are Python packages
         # Key: folder path (str) - relative path from project root (e.g., "src/models")  
         # Value: qualified name (str) - dot-separated identifier (e.g., "myproject.src.models")
@@ -24,11 +81,11 @@ class ASTParser():
         # because packages use qualified_name as identifier while folders use path
         self.folder_qname_map = {}
 
-        self.module_symbols = {}
-        self.import_map = {}
-        self.func_symbols = {}   # name → qualified_name
-        self.method_symbols = {} # name → qualified_name
-        self.class_symbols = {}
+        self.module_symbols = {}     # Internal module registry: mod_qname → mod_qname
+        self.import_map = {}         # Import alias resolution across modules: alias → resolved target
+        self.func_symbols = {}       # Top-level/nested function table: name → qualified_name
+        self.method_symbols = {}     # Method table: name → qualified_name (populated within class scope)
+        self.class_symbols = {}      # Class table: name → qualified_name
         self.builtin_funcs = set(dir(builtins))
 
         self.class_method_symbols = {}  # {class_qname: {method_name: method_qualified_name}}
@@ -39,29 +96,94 @@ class ASTParser():
         self.mod_to_external_used: dict[str, set[str]] = defaultdict(set)
     
     def parse(self) -> tuple[list, list]:
-        """Run the full parse and return lists of node and edge objects."""
+        """Run the full parse and return lists of node and edge objects.
+
+        Overview
+        --------
+        parse() coordinates the main phases to construct the code knowledge graph:
+          1) Filesystem traversal (Phase 2.2)
+             - Create structural nodes (Project, Folder, Package, Module, File)
+             - Establish CONTAINS_* edges
+             - Seed symbol tables for internal modules
+             - Parse each Python module to harvest classes, functions, methods, imports, calls
+          2) Declared dependency discovery (Phase 2.7)
+             - Read pyproject.toml and/or requirements*.txt
+             - Upsert ExternalPackageNode for each dependency
+             - Emit Project → DEPENDS_ON_EXTERNAL edges (deduped)
+          3) Post-processing overrides (Phase 2.5.2)
+             - Based on previously collected class_bases and per-class method tables
+             - Emit OVERRIDES edges for methods shadowing base-class methods
+
+        Returns
+        -------
+        (nodes, edges) : tuple[list, list]
+            The complete list of node and edge objects created during parsing.
+        """
+
         self._walk_files_and_dirs()
         self._parse_dependencies_from_manifest()
         self._handle_overrides()
+
         return self.nodes, self.edges
     
     def _walk_files_and_dirs(self):
         """
-        Recursively walk the project directory to build a comprehensive graph structure.
-        
-        This method performs a complete traversal of the project filesystem and:
-        1. Detects structural elements: folders, packages (directories with __init__.py), 
-            Python modules (.py files), and regular files
-        2. Creates appropriate node objects for each discovered element
-        3. Establishes CONTAINS_* relationships following the containment hierarchy
-        4. Maintains consistent identifier mapping (name/qualified_name/path) across node types
-        
-        The traversal follows these containment rules:
-        - Project (identified by name) can contain: Packages, Folders, Modules, Files
-        - Package (identified by qualified_name) can contain: Packages, Folders, Modules, Files  
-        - Folder (identified by path) can contain: Packages, Folders, Modules, Files
-        
-        Qualified names follow the pattern: project_name.folder1.folder2.module_name
+        Traverse the project filesystem to construct the structural part of the graph.
+
+        Why this method exists
+        ----------------------
+        This method is responsible for:
+        - Discovering structural elements: Project, Folder, Package (dir with __init__.py),
+          Module (.py files), and non-Python File.
+        - Emitting CONTAINS_* edges to reflect the containment hierarchy.
+        - Seeding symbol tables (e.g., module_symbols) used by later phases (imports, calls).
+        - Ensuring consistent identifier strategy across nodes:
+          - ProjectNode: identified by `name` (the basename of project root path).
+          - PackageNode: identified by `qualified_name` (qname).
+          - FolderNode: identified by `path` (relative path).
+          - ModuleNode: identified by `qualified_name` (qname).
+          - FileNode: identified by `path` (relative path).
+
+        Identifier strategy & containment rules
+        ---------------------------------------
+        - Qualified names are prefixed with `project_name` for uniqueness across repositories:
+            project_name.[subdirs].[module_name]
+        - Parent container selection uses both physical path and package mapping:
+          - If a directory is a Python package (has __init__.py), we create a PackageNode and
+            register folder_qname_map[path] = package_qname so that children attach to qname.
+          - Otherwise, we create a FolderNode and children attach to its path.
+        - Edge emission:
+          - Project/Folder/Package --CONTAINS_PACKAGE--> Package (target=qualified_name)
+          - Project/Folder/Package --CONTAINS_FOLDER--> Folder (target=path)
+          - Project/Folder/Package --CONTAINS_MODULE--> Module (target=qualified_name)
+          - Project/Folder/Package --CONTAINS_FILE--> File (target=path)
+
+        Example
+        -------
+        For a project "myproj" with:
+          src/
+            __init__.py
+            util.py
+            data/
+              __init__.py
+              loader.py
+            assets/
+              logo.png
+
+        This method creates:
+          - ProjectNode("myproj")
+          - PackageNode("myproj.src"), ModuleNode("myproj.src.util")
+          - PackageNode("myproj.src.data"), ModuleNode("myproj.src.data.loader")
+          - FolderNode("src/assets"), FileNode("src/assets/logo.png")
+        And edges:
+          - myproj --CONTAINS_PACKAGE--> myproj.src
+          - myproj.src --CONTAINS_MODULE--> myproj.src.__init__
+          - myproj.src --CONTAINS_MODULE--> myproj.src.util
+          - myproj.src --CONTAINS_PACKAGE--> myproj.src.data
+          - myproj.src.data --CONTAINS_MODULE--> myproj.src.data.__init__
+          - myproj.src.data --CONTAINS_MODULE--> myproj.src.data.loader
+          - myproj.src --CONTAINS_FOLDER--> src/assets
+          - src/assets --CONTAINS_FILE--> src/assets/logo.png
         """
         # Create the root project node using the project directory name
         project_node = ProjectNode(name=self.project_root.name)
@@ -80,37 +202,43 @@ class ASTParser():
 
             # Generate path string and qualified name for current directory
             current_path_str = str(rel_path)
-            # Include project name in qualified name to ensure uniqueness across projects
+            # Qualified name for packages/modules: prefix with project name, then join relative parts.
             current_qname = ".".join([self.project_root.name] + list(rel_path.parts))
 
             def get_parent_source():
                 """
-                Determine the parent container and its type for establishing CONTAINS_* relationships.
-                
-                Returns:
-                    tuple: (parent_identifier, parent_type) where:
-                    - parent_identifier: The unique identifier for the parent node
-                    - parent_type: The node type ("Project", "Package", or "Folder")
+                Determine the parent container's identifier and type for CONTAINS_* edges.
+
+                Returns
+                -------
+                (parent_identifier, parent_type) : tuple[str, str]
+                    parent_identifier:
+                      - ProjectNode.name for direct children of the root
+                      - PackageNode.qualified_name if the parent directory is a package
+                      - FolderNode.path if the parent directory is a regular folder
+                    parent_type:
+                      - "Project" | "Package" | "Folder" (informational; not used in edge schema)
                 """
-                parent_path = rel_path.parent
+                parent_path = rel_path.parent # Relative path of the parent directory
                 
-                # If no parent parts, this is a direct child of the project root
+                # If there is no parent (this is an immediate child of the project root),
+                # the parent container is the ProjectNode (identified by project_name).
                 if not parent_path.parts:
                     return self.project_root.name, "Project"
                 else:
                     parent_path_str = str(parent_path)
-                    # Check if parent directory was registered as a package
+                    # If the parent directory was registered as a package, use its qname.
                     if parent_path_str in self.folder_qname_map:
-                        # Parent is a package - use its qualified name as identifier
                         return self.folder_qname_map[parent_path_str], "Package"
+                    # Otherwise, it is a regular folder; use its path as the identifier.
                     else:
-                        # Parent is a regular folder - use its path as identifier
                         return parent_path_str, "Folder"
 
-            # Process non-root directories (skip the project root itself)
+            # For non-root directories, create either a PackageNode or FolderNode
+            # and wire it to its parent with the appropriate CONTAINS_* edge.
             if not current_is_root:
                 # Get parent information for establishing containment relationships
-                parent_source, parent_type = get_parent_source()
+                parent_source, parent_type = get_parent_source()    # Obtain parent identifier for edge source
                 
                 if is_package:
                     # Create a Package node for directories containing __init__.py
@@ -121,7 +249,7 @@ class ASTParser():
                     )
                     self.nodes.append(pkg_node)
                     
-                    # Register this package in the mapping for future parent lookups
+                    # Remember that this directory is a package; future children should attach by qname
                     self.folder_qname_map[current_path_str] = current_qname
                     
                     # Create CONTAINS_PACKAGE relationship from parent to this package
@@ -131,7 +259,7 @@ class ASTParser():
                         type="CONTAINS_PACKAGE"
                     ))
                 else:
-                    # Create a Folder node for regular directories
+                    # Create a FolderNode (regular directory without __init__.py)
                     folder_node = FolderNode(
                         path=current_path_str,    # Relative path serves as identifier
                         name=current_path.name    # Simple directory name
@@ -145,15 +273,17 @@ class ASTParser():
                         type="CONTAINS_FOLDER"
                     ))
 
-            # Process all files in the current directory
+            # Handle files located in the current directory (both Python and non-Python)
             for file in filenames:
                 file_path = current_path / file
                 rel_file_path = file_path.relative_to(self.project_root)
                 ext = file_path.suffix
 
-                # Determine the container that will "own" this file
+                # Determine which container "owns" this file for the CONTAINS_* edge:
+                # - If we are at the root, the container is the ProjectNode (identified by project_name).
+                # - If current dir is a package, use the package qname.
+                # - Otherwise, use the folder's path.
                 if current_is_root:
-                    # File is directly in project root
                     container_source = self.project_root.name
                 else:
                     if is_package:
@@ -164,10 +294,11 @@ class ASTParser():
                         container_source = current_path_str
 
                 if ext == ".py":
-                    # Create Module node for Python source files
-                    # Include project name in qualified name for global uniqueness
+                    # For Python source files, create a ModuleNode.
+                    # Module qname = project_name + relative path without extension, with path separators replaced by dots.
                     mod_qname = ".".join([self.project_root.name] + list(rel_file_path.with_suffix('').parts))
                     
+                    # Seed internal module registry for import resolution in later phases.
                     self.module_symbols[mod_qname] = mod_qname
 
                     module_node = ModuleNode(
@@ -184,9 +315,10 @@ class ASTParser():
                         type="CONTAINS_MODULE"
                     ))
 
+                    # Parse the module to extract semantic elements (classes, functions, imports, calls, etc.).
                     self._parse_module(file_path, mod_qname)
                 else:
-                    # Create File node for non-Python files
+                    # For non-Python files, create a FileNode with its relative path as identifier.
                     file_node = FileNode(
                         path=str(rel_file_path),  # Relative path serves as identifier
                         name=file,                # Filename with extension
@@ -490,11 +622,41 @@ class ASTParser():
                     self._record_external_use(mod_qname, module_part, is_relative=is_rel)
 
     def _handle_class(self, node: ast.ClassDef, mod_qname: str, context_stack: list):
-        qualified_name = f"{mod_qname}.{node.name}"
-        decorators = [ast.unparse(d) for d in node.decorator_list]
-        docstring = ast.get_docstring(node)
+        """
+        Register a class definition, emit structural/semantic edges, and enqueue its internals.
 
-        self.class_symbols[node.name] = qualified_name
+        Why this method exists
+        ----------------------
+        - Classes are first-class semantic entities in the graph. We need to:
+          1) Create a ClassNode with metadata (decorators, docstring, etc).
+          2) Connect it to the defining module via DEFINES.
+          3) Capture inheritance targets to emit INHERITS edges and store bases for
+             the later OVERRIDES pass.
+          4) Discover and register methods (FunctionDef inside the class body).
+
+        Parameters
+        ----------
+        node : ast.ClassDef
+            The AST node representing a class definition.
+        mod_qname : str
+            The qualified name of the module that contains this class.
+        context_stack : list
+            A simple stack used to track parse context (e.g., inside class/function).
+            It is updated here to ensure functions found in the class body are treated as methods.
+
+        Behavior
+        --------
+        - Compute the class qualified name and record it in class_symbols (name → qname).
+        - Create a ClassNode; append to self.nodes and a DEFINES edge from the module.
+        - Emit INHERITS edges and persist class_bases[class_qname] = [base_targets].
+        - Initialize per-class method table self.class_method_symbols[class_qname] = {}.
+        - Iterate child FunctionDef to register methods via _handle_function().
+        """
+        qualified_name = f"{mod_qname}.{node.name}" # e.g., "myproj.src.MyClass"
+        decorators = [ast.unparse(d) for d in node.decorator_list]  # Extract decorators as strings
+        docstring = ast.get_docstring(node)             # Extract docstring if available    
+
+        self.class_symbols[node.name] = qualified_name  # Register class in the symbol table
 
         class_node = ClassNode(
             name=node.name,
@@ -513,25 +675,56 @@ class ASTParser():
             type="DEFINES"
         ))
 
-        # Detect inherit edge
+        # Capture inheritance relationships and store bases for OVERRIDES phase
         self._handle_inherits(node, qualified_name)
 
-        # Detect method in a class
-        context_stack.append("class")
+        # Traverse class body to process methods
+        context_stack.append("class")   # Enter class context so functions become methods
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef):
                 self._handle_function(child, qualified_name, context_stack)
-        context_stack.pop()
+        context_stack.pop()             # Exit class context
     
     def _handle_function(self, node: ast.FunctionDef, mod_or_class_qname: str, context_stack: list):
-        qualified_name = f"{mod_or_class_qname}.{node.name}"
-        decorators = [ast.unparse(d) for d in node.decorator_list]
-        docstring = ast.get_docstring(node)
-        params = [arg.arg for arg in node.args.args]
-        return_type = ast.unparse(node.returns) if node.returns else None
+        """
+        Register a function or method, emit DEF edges, collect calls, and recurse into nested defs.
 
-        is_method = context_stack and context_stack[-1] == "class"
-        func_node = MethodNode if is_method else FunctionNode
+        Why this method exists
+        ----------------------
+        - Functions and methods are primary semantic nodes. We need to:
+          1) Decide whether the definition is a top-level/nested function or a class method.
+          2) Create the corresponding node (FunctionNode or MethodNode) with metadata.
+          3) Connect it to its parent via DEFINES or DEFINES_METHOD.
+          4) Populate symbol tables used for call resolution and overrides.
+          5) Walk the function body to emit CALLS edges and register nested functions.
+
+        Parameters
+        ----------
+        node : ast.FunctionDef
+            AST node for the function/method definition.
+        mod_or_class_qname : str
+            Qualified name of the parent container (module or class).
+        context_stack : list
+            Parser context stack. If the top is "class", the current def is a method.
+
+        Behavior
+        --------
+        - Compute qualified_name and capture metadata: decorators, docstring, parameters, return type.
+        - Instantiate FunctionNode or MethodNode depending on context.
+        - Emit DEFINES or DEFINES_METHOD edge from parent to this node.
+        - Update func_symbols or method_symbols and per-class method table for OVERRIDES detection.
+        - Walk the body to:
+          - Find ast.Call nodes → _handle_call().
+          - Discover nested FunctionDef → recurse to register them.
+        """
+        qualified_name = f"{mod_or_class_qname}.{node.name}"    # e.g., "myproj.src.MyClass.my_method" or "myproj.src.my_function"
+        decorators = [ast.unparse(d) for d in node.decorator_list]  # Extract decorators as strings
+        docstring = ast.get_docstring(node) # Extract docstring if available
+        params = [arg.arg for arg in node.args.args]    # Extract parameter names
+        return_type = ast.unparse(node.returns) if node.returns else None   # Extract return type if specified
+
+        is_method = context_stack and context_stack[-1] == "class"  # Inside class? Then it's a Method
+        func_node = MethodNode if is_method else FunctionNode   # Node type discriminator
 
         func_obj = func_node(
             name=node.name,
@@ -553,65 +746,98 @@ class ASTParser():
             type="DEFINES_METHOD" if is_method else "DEFINES"
         ))
 
+        # Update symbol tables to enable call/override resolution
         if is_method:
-            self.method_symbols[node.name] = qualified_name
-            # Ghi lại method cho class này
+            self.method_symbols[node.name] = qualified_name # Global map: method name → method qname
+            # Record this method under its declaring class for OVERRIDES analysis
             if mod_or_class_qname in self.class_method_symbols:
                 self.class_method_symbols[mod_or_class_qname][node.name] = qualified_name
         else:
-            self.func_symbols[node.name] = qualified_name
+            self.func_symbols[node.name] = qualified_name   # Global map: function name → function qname
         
+        # Walk the function body to collect CALLS edges
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
                 self._handle_call(child, qualified_name, is_method) 
 
-        # Detect sub-function in a nested function
-        context_stack.append("function")
+        # Recurse into nested function definitions (def inside def)
+        context_stack.append("function")    # Enter function context for correct nesting semantics
         for child in node.body:
             if isinstance(child, ast.FunctionDef):
                 self._handle_function(child, qualified_name, context_stack)
-        context_stack.pop()
+        context_stack.pop()                 # Exit function context
     
     def _handle_call(self, node: ast.Call, current_class_or_func_qname: str, is_method: bool):
-        callee_raw = ast.unparse(node.func)
+        """
+        Analyze a call expression and emit a CALLS edge with resolved callee type.
+
+        Why this method exists
+        ----------------------
+        - Call sites form the backbone of dynamic relationships in the graph.
+        - We attempt lightweight resolution to classify calls as:
+          Function, Method, Constructor, Built-in, or External, and store
+          the raw callee text for future refinement.
+
+        Parameters
+        ----------
+        node : ast.Call
+            The call expression to analyze.
+        current_class_or_func_qname : str
+            Qualified name of the current caller (function or method).
+        is_method : bool
+            True if the caller is a MethodNode, false if a FunctionNode.
+
+        Behavior
+        --------
+        - Case 1: ast.Name
+          - If name matches known function/method/class → resolve to qname and type.
+          - If name is a Python builtin → mark as BUILTIN (target=None).
+        - Case 2: ast.Attribute
+          - If receiver is `self` → treat as method of the current class (best-effort).
+          - Else if attribute name matches a known class → treat as constructor.
+          - Else → mark as EXTERNAL and keep the raw dotted expression.
+        - Emit a CallsEdge with caller_type/callee_type and callee_raw preserved.
+
+        """
+        callee_raw = ast.unparse(node.func) # Raw text of the callee (e.g., "requests.get")
+        # Simple identifier call, e.g., foo()
         if isinstance(node.func, ast.Name):
             name = node.func.id
-            if name in self.func_symbols:
+            if name in self.func_symbols:                   # Known function in the project
                 callee_qname = self.func_symbols[name]
-                callee_type = NodeType.FUNCTION
-            elif name in self.method_symbols:
+                callee_type = NodeType.FUNCTION             
+            elif name in self.method_symbols:               # Known function in the project
                 callee_qname = self.method_symbols[name]
                 callee_type = NodeType.METHOD
-            elif name in self.class_symbols:
+            elif name in self.class_symbols:                # Calling a class name → constructor call
                 callee_qname = self.class_symbols[name]
                 callee_type = NodeType.CONSTRUCTOR
-            elif name in self.builtin_funcs:
+            elif name in self.builtin_funcs:                # Built-in function (e.g., "len", "print")
                 callee_qname = None 
                 callee_type = NodeType.BUILTIN
-            else:
+            else:                                           # Unresolved/unknown
                 callee_qname, callee_type = None, None
-        # Case 2: gọi tới method qua self (self.method())
+        # Qualified attribute call, e.g., obj.method() or pkg.fn()
         elif isinstance(node.func, ast.Attribute):
-            # Check self.method()
+            # Special-case: self.method() inside a class → treat as method of current class
             if isinstance(node.func.value, ast.Name) and node.func.value.id == "self":
                 method_name = node.func.attr
                 callee_qname = f"{current_class_or_func_qname}.{method_name}"
                 callee_type = NodeType.METHOD
             else:
-                # Không resolve được (không phải self.method), check external
+                # Fallbacks for attribute calls
                 attr_name = node.func.attr
-                # Nếu không phải class local
                 if attr_name in self.class_symbols:
                     callee_qname = self.class_symbols[attr_name]
                     callee_type = NodeType.CONSTRUCTOR
                 else:
-                    # External call
+                    # Treat as external call (e.g., requests.get)
                     callee_qname = ast.unparse(node.func)   # vd: "requests.get"
                     callee_type = NodeType.EXTERNAL
         else:
             callee_qname, callee_type = None, None
         
-                    # Tạo CallsEdge
+        # Emit the CALLS relationship with classified types
         self.edges.append(CallsEdge(
             source=current_class_or_func_qname,
             target=callee_qname,
@@ -622,10 +848,34 @@ class ASTParser():
         ))
     
     def _handle_inherits(self, node: ast.ClassDef, class_qname: str):
-        # Detect inherit edge
-        bases = []
+        """
+        Emit INHERITS edges for each base and persist bases for later OVERRIDES detection.
+
+        Why this method exists
+        ----------------------
+        - Inheritance drives polymorphism. Capturing base classes enables:
+          1) Upstream hierarchy queries (who inherits from X?).
+          2) Downstream OVERRIDES detection after all methods are known.
+
+        Parameters
+        ----------
+        node : ast.ClassDef
+            The class AST containing base expressions in node.bases.
+        class_qname : str
+            Qualified name of the current class.
+
+        Behavior
+        --------
+        - For each base:
+          - If ast.Name and resolvable via self.class_symbols → link to internal class qname.
+          - Else use ast.unparse(base) to keep the dotted raw representation (external/unresolved).
+        - Append an InheritsEdge for each base.
+        - Store the list of base targets in self.class_bases[class_qname].
+        - Initialize an empty per-class method table (if not already present).
+        """
+        bases = []                                                  # Accumulator of resolved/normalized base targets
         for base in node.bases:
-            if isinstance(base, ast.Name):
+            if isinstance(base, ast.Name): 
                 base_name = base.id
                 if base_name in self.class_symbols:
                     target_qname = self.class_symbols[base_name]
@@ -648,16 +898,33 @@ class ASTParser():
 
     def _handle_overrides(self):
         """
-        Sau khi đã parse xong toàn bộ class/method, phát hiện các OVERRIDES edge.
+        Compute and emit OVERRIDES edges after all classes/methods have been registered.
+
+        Why this method exists
+        ----------------------
+        - Method overriding is determined only when the full class hierarchy and
+          per-class method tables are known. This post-processing phase walks the
+          recorded class_bases and class_method_symbols to connect overriding methods
+          to their base class counterparts.
+
+        Behavior
+        --------
+        - For each class:
+          - For each of its methods:
+            - For each of its bases:
+              - If the base is internal (i.e., present in class_method_symbols):
+                - If the base defines a method with the same name:
+                  → Emit OVERRIDES(child_method → base_method).
+              - External bases (raw dotted strings) are skipped.
         """
-        # Duyệt từng class
+        # Iterate each class and its bases
         for class_qname, bases in self.class_bases.items():
-            # Duyệt từng method trong class đó
+            # Iterate each method in the class
             method_map = self.class_method_symbols.get(class_qname, {})
             for method_name, method_qname in method_map.items():
-                # Duyệt từng base class của class này
+                # Iterate each base class of this class
                 for base in bases:
-                    # Nếu base là class internal, kiểm tra method trong đó
+                    # If the base is internal, check its methods
                     base_method_map = self.class_method_symbols.get(base, {})
                     base_method_qname = base_method_map.get(method_name)
                     if base_method_qname:
