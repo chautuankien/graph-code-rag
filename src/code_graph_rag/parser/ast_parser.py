@@ -5,6 +5,7 @@ from pathlib import Path
 import builtins
 import tomllib
 import glob
+from collections import defaultdict
 
 from src.code_graph_rag.models.nodes import *
 from src.code_graph_rag.models.edges import *
@@ -35,6 +36,7 @@ class ASTParser():
 
         # External packages cache: normalized_name -> ExternalPackageNode
         self.external_packages: dict[str, ExternalPackageNode] = {}
+        self.mod_to_external_used: dict[str, set[str]] = defaultdict(set)
     
     def parse(self) -> tuple[list, list]:
         """Run the full parse and return lists of node and edge objects."""
@@ -443,8 +445,14 @@ class ASTParser():
                         import_name=full_name        # Textual module path as written in code
                     ))
 
+                    # Record external use for this module
+                    self._record_external_use(mod_qname, full_name, is_relative=False)
+
             # ----- Case B: `from pkg.mod import name [as alias]` -----
             elif isinstance(node, ast.ImportFrom):  # Handle `from ... import ...` forms (supports relative imports)
+                # Relative if node.level > 0
+                is_rel = node.level and node.level > 0
+                
                 module_part = node.module or ""  # Base specified after `from`; empty for `from . import X`
                 # compute base qname for relative imports
                 if node.level > 0:  # node.level counts leading dots in `from ....` (number of package levels to go up)
@@ -477,6 +485,9 @@ class ASTParser():
                         type="IMPORTS",             # Relationship label
                         import_name=import_name     # Normalized textual import path
                     ))
+
+                    # Record external use for this module
+                    self._record_external_use(mod_qname, module_part, is_relative=is_rel)
 
     def _handle_class(self, node: ast.ClassDef, mod_qname: str, context_stack: list):
         qualified_name = f"{mod_qname}.{node.name}"
@@ -657,7 +668,81 @@ class ASTParser():
                             type="OVERRIDES"
                         ))
                     # Nếu base là external (tên raw string), skip
-        
+    
+    def _record_external_use(self, mod_qname: str, import_name: str, is_relative: bool = False) -> None:
+        """
+        Decide whether `import_name` (e.g., "numpy", "PIL.Image") used by `mod_qname`
+        is an *external* dependency and, if yes, emit a module-level
+        DEPENDS_ON_EXTERNAL edge to the corresponding ExternalPackageNode.
+
+        Parameters
+        ----------
+        mod_qname : str
+            Qualified name of the current module (e.g., "proj.pkg.mod").
+        import_name : str
+            The (already resolved) import token. For ImportFrom, we pass the base
+            module part (e.g., "requests.exceptions", "PIL") rather than the leaf symbol.
+        is_relative : bool, keyword-only
+            True if the originating ImportFrom was relative (node.level > 0).
+            Relative imports are *always internal*, so they must be skipped here.
+
+        Behavior
+        --------
+        1) If `is_relative` is True → skip (internal by definition).
+        2) If top-level token or the entire `import_name` is recognized as *internal*
+        (present in `self.module_symbols`) → skip.
+        3) Otherwise map known module→package (PIL→Pillow, cv2→opencv-python, ...),
+        normalize the package name (PEP 503), upsert ExternalPackageNode (spec = ""),
+        and emit a single module-level DEPENDS_ON_EXTERNAL edge (deduplicated per module).
+
+        Notes
+        -----
+        - This method is idempotent. Repeated calls for the same (module, package)
+        will not create duplicate edges thanks to `self.mod_to_external_used`.
+        """
+        # 1) Relative imports are always internal
+        if is_relative:
+            return
+
+        if not import_name:
+            return
+
+        # 2) Extract top-level token: "a.b.c" -> "a"
+        top = import_name.split(".", 1)[0]
+
+        # 3) Internal module discovered in Phase 2.2? -> skip
+        if top in self.module_symbols or import_name in self.module_symbols:
+            return
+
+        # 4) Map to distribution name and normalize
+        mapper = getattr(self, "WELL_KNOWN_IMPORT_TO_PKG", None)
+        if mapper is None:
+            # Fallback to a module-level constant if you keep it there.
+            try:
+                mapper = WELL_KNOWN_IMPORT_TO_PKG
+            except NameError:
+                mapper = {}
+        raw_pkg = mapper.get(top, top)
+        norm_pkg = self._norm_pkg_name(raw_pkg)
+
+        # 5) Dedup per module
+        used = self.mod_to_external_used.setdefault(mod_qname, set())
+        if norm_pkg in used:
+            return
+
+        # 6) Ensure node exists (spec may be filled later by manifest)
+        self._upsert_external_package(norm_pkg, "")
+
+        # 7) Emit Module -> DEPENDS_ON_EXTERNAL
+        self.edges.append(
+            DependsOnExternalEdge(
+                source=mod_qname,
+                target=norm_pkg,
+                type="DEPENDS_ON_EXTERNAL",
+            )
+        )
+        used.add(norm_pkg)
+
     @staticmethod
     def _split_req_line(line: str) -> tuple[str, str] | None:
         """
@@ -790,6 +875,15 @@ class ASTParser():
 
         return node
 
+WELL_KNOWN_IMPORT_TO_PKG = {
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "yaml": "PyYAML",
+    "dateutil": "python-dateutil",
+    "bs4": "beautifulsoup4",
+    "skimage": "scikit-image",
+    "Crypto": "pycryptodome",
+}
 
 if __name__ == "__main__":
     parser = ASTParser("tests/sample_repo/")
