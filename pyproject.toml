@@ -19,7 +19,6 @@ dependencies = [
     "pymgclient (>=1.4.0,<2.0.0)",
     "streamlit (>=1.48.0,<2.0.0)",
     "pytest (>=8.4.1,<9.0.0)",
-    "loguru (>=0.7.3,<0.8.0)"
 ]
 
 [tool.poetry]

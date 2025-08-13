@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import logging.config
-from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 import contextvars
 import uuid
@@ -102,7 +101,7 @@ def pipeline_context(pipeline: str, run_id: str | None = None) -> Iterator[dict[
 # Idempotent guard to avoid duplicate handlers/double logging.
 _CONFIGURED = False
 
-def setup_logging(level: str = "INFO", log_file: str = "app.log", force: bool = False) -> None:
+def setup_logging(level: str = "INFO", log_file: str = "app.log", force: bool = False, is_pytest: bool = False) -> None:
     """Configure root logging once, with console and rotating file handlers.
 
     This function is safe to call from any pipeline or entry point. By default,
@@ -112,39 +111,64 @@ def setup_logging(level: str = "INFO", log_file: str = "app.log", force: bool = 
         level: Minimum log level for handlers (e.g., "INFO", "DEBUG").
         log_file: Path to the rotating log file.
         force: If True, reconfigure even if logging seems already configured.
+        is_pytest: setup for pytest environment, which uses file logging only.
     """
     global _CONFIGURED
     root = logging.getLogger()
+
+    # Idempotency: if we've configured already and not forcing, do nothing.
     if _CONFIGURED and not force:
         return
+    # Respect host frameworks (Streamlit/Uvicorn/Pytest) that may have
+    # configured logging. Avoid duplicating handlers unless force=True.
     if root.handlers and not force:
         # Another framework configured logging; don't duplicate handlers.
         _CONFIGURED = True
         return
 
+    # Formatter templates
+    # - %(asctime)s: timestamp formatted by datefmt below
+    # - %(levelname)s: record level (INFO/DEBUG/...)
+    # - %(name)s: logger name (e.g., module path)
+    # - %(pipeline)s/%(run_id)s/%(corr_id)s: context fields injected by ContextFilter
+    # - %(message)s: the log message
+    # - For file logs, include %(filename)s:%(lineno)d for quick source lookup
     fmt_console = "%(asctime)s %(levelname)s %(name)s [p=%(pipeline)s r=%(run_id)s c=%(corr_id)s]: %(message)s"
     fmt_file = (
         "%(asctime)s %(levelname)s %(name)s [p=%(pipeline)s r=%(run_id)s c=%(corr_id)s] "
         "%(filename)s:%(lineno)d: %(message)s"
     )
 
+    # dictConfig schema
+    # - version: Required; dictConfig schema version (must be 1).
+    # - disable_existing_loggers: Keep library loggers enabled when False.
+    # - filters: Declare reusable filters by name (here: "context").
+    # - formatters: Named formatters for console and file outputs.
+    # - handlers: Output targets (console/file) referencing formatters/filters.
+    # - loggers: Named loggers to configure (note: root logger is usually the
+    #   top-level key "root"; a logger named "root" is not the same as the
+    #   true root. Kept as-is to match current behavior.).
     logging.config.dictConfig({
-        "version": 1,
-        "disable_existing_loggers": False,
+        "version": 1,  # Schema version.
+        "disable_existing_loggers": False,  # Do not silence library loggers.
         "filters": {
+            # Register a filter that injects corr_id/pipeline/run_id into records.
             "context": {"()": ContextFilter, "fields": ["corr_id", "pipeline", "run_id"]}
         },
         "formatters": {
+            # Console and file formatter. datefmt controls how %(asctime)s is rendered.
             "console": {"format": fmt_console, "datefmt": "%Y-%m-%d %H:%M:%S"},
             "file": {"format": fmt_file, "datefmt": "%Y-%m-%d %H:%M:%S"},
         },
         "handlers": {
+            # Stream to stderr by default. Attach context filter and console formatter.
             "console": {
                 "class": "logging.StreamHandler",
                 "level": level,
                 "formatter": "console",
                 "filters": ["context"],
             },
+            # Rotating file handler: ~5MB per file, keep 3 backups, UTF-8 encoding.
             "file": {
                 "class": "logging.handlers.RotatingFileHandler",
                 "level": level,
@@ -157,10 +181,13 @@ def setup_logging(level: str = "INFO", log_file: str = "app.log", force: bool = 
             },
         },
         "loggers": {
-            "": {  # root for entire app
-                "handlers": ["console", "file"],
+            # Configure a logger named "root" with both handlers. Note: in
+            # dictConfig, the true root logger is configured via top-level
+            # key "root". This entry targets a regular logger named "root".
+            "root": {  # root for entire app (named logger)
+                # If is_pytest, use only file handler to avoid console noise.
+                "handlers": (["file"] if is_pytest else ["console", "file"]),
                 "level": level,
-                "propagate": False,
             },
         },
     })

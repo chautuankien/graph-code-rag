@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from loguru import logger
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -18,6 +17,9 @@ from .models import Action, QueryIntent, Route
 
 # Import LLM helper used to generate JSON intents.
 from ..agent.llm import get_cypher_generate_model  # reuse your helper
+
+from src.code_graph_rag.utils.logging_setup import get_logger
+log = get_logger(__name__)
 
 JSON_INSTRUCTIONS = """
 You are an intent parser for a code graph QA agent.
@@ -85,22 +87,26 @@ def llm_parse_intent(question: str) -> QueryIntent:
         json.JSONDecodeError: If both attempts return non-JSON text.
         pydantic.ValidationError: If the JSON does not match the schema.
     """
-    logger.debug(f"intent.question: {question}")
+    log.debug("intent.question: %s", question)
     llm = get_cypher_generate_model()  # small/cheap model is OK
     prompt = ChatPromptTemplate.from_messages(
         [("system", JSON_INSTRUCTIONS), ("user", "{q}")]
     )
     chain = prompt | llm | StrOutputParser()
     raw = chain.invoke({"q": question})
-    logger.debug(f"intent.raw_first: {raw}")
+    log.debug("intent.raw_first: %s", raw)
+
     try:
         obj: dict[str, Any] = json.loads(raw)
         # language fallback if the model missed it
         obj.setdefault("language", _detect_language(question))
+
         qi = QueryIntent.model_validate(obj)
+        log.debug("intent.validated_first: %s", qi.model_dump())
+
         return qi
     except Exception as e:
-        logger.error(f"intent.parse_error: {e}")
+        log.error("intent.parse_error: %s", e)
         # one-shot repair with error hints
         repair = ChatPromptTemplate.from_messages(
             [("system", JSON_INSTRUCTIONS + REPAIR_HINT), ("user", "{q}")]
@@ -108,12 +114,15 @@ def llm_parse_intent(question: str) -> QueryIntent:
         fixed = (repair | llm | StrOutputParser()).invoke(
             {"q": question, "error": str(e)}
         )
-        logger.debug(f"intent.raw_repair: {fixed}")
+        log.debug("intent.raw_repair: %s", fixed)
+
         obj = json.loads(fixed)
         obj.setdefault("language", _detect_language(question))
+        
         qi: QueryIntent = QueryIntent.model_validate(obj)
-        return qi
+        log.debug("intent.validated_repair: %s", qi.model_dump())
 
+        return qi
 
 def decide_route(intent: QueryIntent) -> Route:
     """Choose a fast or plan route based on the intent's action.

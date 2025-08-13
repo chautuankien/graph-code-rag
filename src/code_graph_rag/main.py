@@ -10,7 +10,7 @@ setup_logging(level="INFO", log_file="logs/app.log", force=True)
 
 def build_knowledge_graph() -> None:
     repo_path = Path("sample_repo")
-    export_path = "graph_export.cypher"
+    export_path = "graph_export.cypherl"
     with pipeline_context("build-kg") as ctx:
         log = get_logger(__name__)
         log.info("Start build graph")
