@@ -7,9 +7,13 @@ from pydantic import BaseModel
 
 from src.code_graph_rag.agent.llm import get_cypher_generate_model
 from src.code_graph_rag.agent.utils.utils import run_cypher_query
+from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
+from src.code_graph_rag.agent.models import QueryIntent, Route
 
 class GraphState(BaseModel):
     question: str | None = None
+    intent: QueryIntent | None = None
+    route: str | None = None
     cypher_query: str | None = None
     matched_node: list[dict] | None = None
     code_snippets: list[str] | None = None
@@ -17,6 +21,16 @@ class GraphState(BaseModel):
 
 def user_question_node(state: GraphState):
     return {"question": state.question}
+
+def parse_intent_node(state: GraphState) -> GraphState:
+    intent = llm_parse_intent(state.question or "")
+    state.intent = intent
+    return state
+
+def router_node(state: GraphState) -> GraphState:
+    route = decide_route(state.intent) if state.intent else Route.FAST
+    state.route = route.value
+    return state
 
 def graph_query_node(state: GraphState):
     query_prompt = ChatPromptTemplate.from_messages([
@@ -70,12 +84,16 @@ def answer_generation_node(state: GraphState):
 builder = StateGraph(GraphState)
 
 builder.add_node("UserQuestion", user_question_node)
+builder.add_node("ParseIntent", parse_intent_node)
+builder.add_node("Router", router_node)
 builder.add_node("GraphQuery", graph_query_node)
 builder.add_node("ContextRetrieval", context_trieval_node)
 builder.add_node("AnswerGeneration", answer_generation_node)
 
 builder.set_entry_point("UserQuestion")
-builder.add_edge("UserQuestion", "GraphQuery")
+builder.add_edge("UserQuestion", "ParseIntent")
+builder.add_edge("ParseIntent", "Router")
+builder.add_edge("Router", "GraphQuery")
 builder.add_edge("GraphQuery", "ContextRetrieval" )
 builder.add_edge("ContextRetrieval", "AnswerGeneration")
 builder.set_finish_point("AnswerGeneration")
