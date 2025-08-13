@@ -4,7 +4,8 @@
 **/__pycache__/** 
 .DS_Store
 docs
-draft
+sample_repo/
+logs/
 uploaded_repo/
 graph_export.cypherl
 
