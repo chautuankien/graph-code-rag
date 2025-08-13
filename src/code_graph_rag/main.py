@@ -1,46 +1,42 @@
 from pathlib import Path
-import matplotlib.pyplot as plt
-import networkx as nx
+import uuid
 
-from src.code_graph_rag.utils.file_utils import walk_codebase
-from src.code_graph_rag.parser.ast_parser import ASTParser
-from src.code_graph_rag.graph.exporter import export_to_cypher
+from src.code_graph_rag.utils.logging_setup import setup_logging, pipeline_context, set_corr_id, get_logger
+from src.code_graph_rag.pipeline.build_knowledge_graph import build_knowledge_graph_and_insert_db
+from src.code_graph_rag.agent.graph_agent import graph, GraphState
 
-def parser():
-    repo_path = Path("tests/sample_repo")
-    structure = walk_codebase(repo_path)
+Path("logs").mkdir(parents=True, exist_ok=True)
+setup_logging(level="INFO", log_file="logs/app.log", force=True)
 
-    for node_type, nodes in structure.items():
-        print(f"\n== {node_type.upper()} ==")
-        for node in nodes:
-            print(node)
+def build_knowledge_graph() -> None:
+    repo_path = Path("sample_repo")
+    export_path = "graph_export.cypher"
+    with pipeline_context("build-kg") as ctx:
+        log = get_logger(__name__)
+        log.info("Start build graph")
 
-def test_ast():
-    project_path = Path("sample_repo")
-    parser = ASTParser(project_root=project_path)
-    nodes, edges= parser.parse()
+        build_knowledge_graph_and_insert_db(
+            repo_path=repo_path,
+            export_path=export_path,
+            bootstrap_schema=False,
+            bootstrap_file="db_bootstrap.cypher",
+        )
 
-    # for node in nodes:
-        # print("NODE:", node)
+        log.info("Graph built successfully")
 
-    for edge in edges:
-        print("EDGE:", edge)
+def run_agent(question: str) -> None:
+    # Nếu có request id truyền từ caller, set_corr_id(req_id). Nếu không thì tạo.
+    set_corr_id(str(uuid.uuid4())[:8])
 
+    with pipeline_context("agent") as ctx:
+        log = get_logger(__name__)
+        log.info(f"Agent received question: {question}")
 
-def test_agent():
-    from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
-    from src.code_graph_rag.agent.models import QueryIntent
-
-    question = "Ai gọi foo?"
-    intent = llm_parse_intent(question)
-    route = decide_route(intent)
-
-    print(f"Parsed Intent: {intent}")
-    print(f"Decided Route: {route}")
-
+        state = GraphState(question=question)
+        response = graph.invoke(state)
+        response = GraphState.model_validate(response)
+        log.info(f"Agent response: {response}")
 
 if __name__ == "__main__":
-    
-    # parser()
-    # test_ast()
-    test_agent()
+    build_knowledge_graph()
+    # run_agent("Who calls foo?")

@@ -10,9 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 import mgclient
 
+from src.code_graph_rag.utils.logging_setup import get_logger 
 from src.code_graph_rag.parser.ast_parser import ASTParser
 from src.code_graph_rag.graph.exporter import export_to_cypher
 
+log = get_logger(__name__)
 
 def _exec_many(cur, statements: list[str]) -> None:
     """Execute multiple Cypher statements sequentially.
@@ -46,7 +48,7 @@ def _exec_many(cur, statements: list[str]) -> None:
 
 def build_knowledge_graph_and_insert_db(
     repo_path: str,
-    export_path: str = "graph_export.cypher",
+    export_path: str = "graph_export.cypherl",
     host: str = "localhost",
     port: int = 7687,
     username: str | None = None,
@@ -85,10 +87,12 @@ def build_knowledge_graph_and_insert_db(
     """
     repo = Path(repo_path).resolve()
     out = Path(export_path).resolve()
+    log.debug(f"repo={repo}, export={out}")
 
     # 1) Parse repository into nodes and edges.
     parser = ASTParser(str(repo))
     nodes, edges = parser.parse()
+    log.debug(f"Parsed {len(nodes)} nodes and {len(edges)} edges.")
 
     # 2) Export Cypher using natural keys for idempotent MERGE statements.
     export_to_cypher(nodes, edges, out)
@@ -159,8 +163,6 @@ def build_knowledge_graph_and_insert_db(
     conn.commit()
     cur.close()
     conn.close()
-    print(f"✅ Loaded graph into Memgraph from {repo}")
-
 
 if __name__ == "__main__":
     # Example usage.

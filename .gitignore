@@ -5,6 +5,7 @@
 .DS_Store
 docs
 sample_repo/
+logs/
 uploaded_repo/
 graph_export.cypherl
 
