@@ -18,9 +18,6 @@ class Action(str, Enum):
 
 Language = Literal["vi", "en"]
 
-Route = Literal["fast", "plan"]
-
-
 class QueryIntent(BaseModel):
     """Normalized user intent for routing.
 
@@ -62,7 +59,26 @@ class Route(str, Enum):
     FAST = "FAST"
     PLAN = "PLAN"
 
+CandidateLabel = Literal[
+    "Project", "Package", "Module", "Class", "Function", "Method", "File", "Folder", "ExternalPackage"
+]
 
-def clamp_int(value: int, low: int, high: int) -> int:
-    """Clamp an integer to [low, high]."""
-    return max(low, min(high, value))
+class Candidate(BaseModel):
+    """One possible mapping for a textual mention."""
+    label: CandidateLabel
+    id: str                    # canonical identifier (qname / package name / path)
+    score: float               # 0..1
+    display: str               # human-friendly text
+
+class ResolvedEntity(BaseModel):
+    """Final resolution (and ranked alternatives) for source/destination mentions."""
+    resolved_label: CandidateLabel | None = None
+    resolved_id: str | None = None
+    confidence: float = 0.0
+    candidates: list[Candidate] = []
+    assumption: str | None = None
+
+    resolved_label_dst: CandidateLabel | None = None
+    resolved_id_dst: str | None = None
+    confidence_dst: float = 0.0
+    candidates_dst: list[Candidate] = []

@@ -40,6 +40,8 @@ Rules:
 - If the question is Vietnamese, set "language":"vi", else "en".
 - If destination symbol is implied (trace/impact), fill "mention_dst".
 - Depth/limit/k_paths: choose sensible defaults if unspecified.
+- If a symbol is absent/unspecified, set its field to None (e.g., "mention": None).
+- Never output the string "none"/"null" for missing fields.
 - Do not include any extra fields or comments.
 """
 
@@ -87,14 +89,14 @@ def llm_parse_intent(question: str) -> QueryIntent:
         json.JSONDecodeError: If both attempts return non-JSON text.
         pydantic.ValidationError: If the JSON does not match the schema.
     """
-    log.debug("intent.question: %s", question)
+    log.debug("llm_parse_intent.question: %s", question)
     llm = get_cypher_generate_model()  # small/cheap model is OK
     prompt = ChatPromptTemplate.from_messages(
         [("system", JSON_INSTRUCTIONS), ("user", "{q}")]
     )
     chain = prompt | llm | StrOutputParser()
     raw = chain.invoke({"q": question})
-    log.debug("intent.raw_first: %s", raw)
+    log.debug("llm_parse_intent.raw_first: %s", raw)
 
     try:
         obj: dict[str, Any] = json.loads(raw)
@@ -102,11 +104,11 @@ def llm_parse_intent(question: str) -> QueryIntent:
         obj.setdefault("language", _detect_language(question))
 
         qi = QueryIntent.model_validate(obj)
-        log.debug("intent.validated_first: %s", qi.model_dump())
+        log.debug("llm_parse_intent.validated_first: %s", qi.model_dump())
 
         return qi
     except Exception as e:
-        log.error("intent.parse_error: %s", e)
+        log.error("llm_parse_intent.parse_error: %s", e)
         # one-shot repair with error hints
         repair = ChatPromptTemplate.from_messages(
             [("system", JSON_INSTRUCTIONS + REPAIR_HINT), ("user", "{q}")]
@@ -114,13 +116,13 @@ def llm_parse_intent(question: str) -> QueryIntent:
         fixed = (repair | llm | StrOutputParser()).invoke(
             {"q": question, "error": str(e)}
         )
-        log.debug("intent.raw_repair: %s", fixed)
+        log.debug("llm_parse_intent.raw_repair: %s", fixed)
 
         obj = json.loads(fixed)
         obj.setdefault("language", _detect_language(question))
         
         qi: QueryIntent = QueryIntent.model_validate(obj)
-        log.debug("intent.validated_repair: %s", qi.model_dump())
+        log.debug("llm_parse_intent.validated_repair: %s", qi.model_dump())
 
         return qi
 
