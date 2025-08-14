@@ -6,7 +6,7 @@ from src.code_graph_rag.pipeline.build_knowledge_graph import build_knowledge_gr
 from src.code_graph_rag.agent.graph_agent import graph, GraphState
 
 Path("logs").mkdir(parents=True, exist_ok=True)
-setup_logging(level="INFO", log_file="logs/app.log", force=True)
+setup_logging(level="DEBUG", log_file="logs/app.log", force=True)
 
 def build_knowledge_graph() -> None:
     repo_path = Path("sample_repo")
@@ -38,5 +38,5 @@ def run_agent(question: str) -> None:
         log.info(f"Agent response: {response}")
 
 if __name__ == "__main__":
-    build_knowledge_graph()
-    # run_agent("Who calls foo?")
+    # build_knowledge_graph()
+    run_agent("Who calls sample_repo.app?")

@@ -302,6 +302,7 @@ def resolve_entity(intent: QueryIntent) -> ResolvedEntity:
     log.debug("resolve_entity.source: %s, %s, %s, %s, %s", src_lab, src_id, src_conf, src_cands, src_assump)
     dst_lab, dst_id, dst_conf, dst_cands, dst_assump = (None, None, 0.0, [], None)
 
+    log.debug("resolve_entity.intent.mention_dst: %s", intent.mention_dst)
     if intent.mention_dst:
         dst_lab, dst_id, dst_conf, dst_cands, dst_assump = resolve_one(
             intent.mention_dst
