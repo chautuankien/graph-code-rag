@@ -82,3 +82,50 @@ class ResolvedEntity(BaseModel):
     resolved_id_dst: str | None = None
     confidence_dst: float = 0.0
     candidates_dst: list[Candidate] = []
+
+# 1) Allow-list step names (Literal keeps planner outputs type-safe)
+StepName = Literal[
+    "META", "CALLERS_TOP", "CALLEES_TOP", "IMPORTS", "NEIGHBORHOOD", "PATH",
+    "NODE_META", "METHODS_OF_CLASS", "INHERITS_DIRECT", "OVERRIDDEN_BY",
+    "ENTRY_FUNCS_BY_KEYWORD", "MODULE_OF_SYMBOL", "MODULES_DEPENDING_ON_EXTERNAL",
+    "PROJECT_EXTERNALS", "STATIC_ENRICH"
+]
+
+class PlanStep(BaseModel):
+    """One atomic retrieval/explain step chosen by the planner.
+
+    Args:
+        name: Step identifier from the allow-list.
+        params: Bounded parameter bag. No strings of Cypher.
+        required: If True, missing result will trigger retry/degrade in 3.4.
+
+    Example:
+        PlanStep(name="META", params={"id": "proj.app.main"}, required=True)
+    """
+    name: StepName
+    params: dict[str, Any] = Field(default_factory=dict)
+    required: bool = True
+
+class ExplainPlan(BaseModel):
+    """Planner output consumed by Phase 3.4.
+
+    Fields:
+        steps: Ordered list of steps (deterministic).
+        knobs: Global controls with tight bounds (depth/limit/k).
+
+    Notes:
+        - Bounds mirror QueryIntent clamps.
+        - Deterministic sort expected for test snapshots.
+    """
+    steps: list[PlanStep]
+    knobs: dict[str, int] = Field(default_factory=lambda: {"depth": 2, "limit": 50, "k": 3})
+
+    @field_validator("knobs")
+    @classmethod
+    def clamp_knobs(cls, v: dict[str, int]) -> dict[str, int]:
+        d = dict(v or {})
+        def clamp(x, lo, hi): return max(lo, min(hi, int(x)))
+        d["depth"] = clamp(d.get("depth", 2), 1, 5)
+        d["limit"] = clamp(d.get("limit", 50), 1, 200)
+        d["k"] = clamp(d.get("k", 3), 1, 5)
+        return d
