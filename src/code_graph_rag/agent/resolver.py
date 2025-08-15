@@ -78,15 +78,14 @@ def _rows_exact_name(name: str) -> list[dict[str, Any]]:
     """
     cypher = """
     CALL {
-      WITH $name AS name
-      MATCH (n:Function) WHERE n.name = name
-      RETURN 'Function' AS label, n.qualified_name AS id, n.name AS name
-      UNION ALL
-      MATCH (n:Method) WHERE n.name = name
-      RETURN 'Method' AS label, n.qualified_name AS id, n.name AS name
-      UNION ALL
-      MATCH (n:Class) WHERE n.name = name
-      RETURN 'Class' AS label, n.qualified_name AS id, n.name AS name
+        MATCH (n:Function) WHERE n.name = $name
+        RETURN 'Function' AS label, n.qualified_name AS id, n.name AS name
+        UNION ALL
+        MATCH (n:Method) WHERE n.name = $name
+        RETURN 'Method'  AS label, n.qualified_name AS id, n.name AS name
+        UNION ALL
+        MATCH (n:Class) WHERE n.name = $name
+        RETURN 'Class'   AS label, n.qualified_name AS id, n.name AS name
     }
     RETURN label, id, name
     LIMIT 200
@@ -109,11 +108,11 @@ def _rows_suffix(name: str) -> list[dict[str, Any]]:
     """
     cypher = """
     CALL {
-      WITH $name AS name
-      MATCH (m:Module)
-      WHERE m.qualified_name ENDS WITH '.' + name
-         OR m.name = name OR m.qualified_name = name
-      RETURN 'Module' AS label, m.qualified_name AS id, m.name AS name
+        MATCH (m:Module)
+        WHERE m.qualified_name ENDS WITH ('.' + $name)
+            OR m.name = $name
+            OR m.qualified_name = $name
+        RETURN 'Module' AS label, m.qualified_name AS id, m.name AS name
     }
     RETURN label, id, name
     LIMIT 200
@@ -137,18 +136,17 @@ def _rows_contains(token: str) -> list[dict[str, Any]]:
     """
     cypher = """
     CALL {
-      WITH $t AS t
-      MATCH (n:Module) WHERE n.qualified_name CONTAINS t
-      RETURN 'Module' AS label, n.qualified_name AS id, n.name AS name
-      UNION ALL
-      MATCH (n:Class) WHERE n.qualified_name CONTAINS t OR n.name = t
-      RETURN 'Class' AS label, n.qualified_name AS id, n.name AS name
-      UNION ALL
-      MATCH (n:Function) WHERE n.qualified_name CONTAINS t OR n.name = t
-      RETURN 'Function' AS label, n.qualified_name AS id, n.name AS name
-      UNION ALL
-      MATCH (n:Method) WHERE n.qualified_name CONTAINS t OR n.name = t
-      RETURN 'Method' AS label, n.qualified_name AS id, n.name AS name
+        MATCH (n:Module)  WHERE n.qualified_name CONTAINS $t
+        RETURN 'Module'  AS label, n.qualified_name AS id, n.name AS name
+        UNION ALL
+        MATCH (n:Class)   WHERE n.qualified_name CONTAINS $t OR n.name = $t
+        RETURN 'Class'   AS label, n.qualified_name AS id, n.name AS name
+        UNION ALL
+        MATCH (n:Function) WHERE n.qualified_name CONTAINS $t OR n.name = $t
+        RETURN 'Function' AS label, n.qualified_name AS id, n.name AS name
+        UNION ALL
+        MATCH (n:Method)  WHERE n.qualified_name CONTAINS $t OR n.name = $t
+        RETURN 'Method'  AS label, n.qualified_name AS id, n.name AS name
     }
     RETURN label, id, name
     LIMIT 400

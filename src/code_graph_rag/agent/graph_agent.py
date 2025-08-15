@@ -10,8 +10,9 @@ from src.code_graph_rag.agent.utils.utils import run_cypher_query
 from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
 from src.code_graph_rag.agent.resolver import resolve_entity
 from src.code_graph_rag.agent.models import QueryIntent, Route,  ResolvedEntity
-from src.code_graph_rag.agent.planner import make_plan
+from src.code_graph_rag.agent.plan_maker import make_plan
 from src.code_graph_rag.agent.models import ExplainPlan
+from src.code_graph_rag.agent.plan_runner import run_plan
 
 class GraphState(BaseModel):
     question: str | None = None
@@ -19,6 +20,7 @@ class GraphState(BaseModel):
     route: str | None = None
     resolve: ResolvedEntity | None = None
     plan: ExplainPlan | None = None
+    plan_outputs: dict[str, list[dict]] | None = None
     # cypher_query: str | None = None
     # matched_node: list[dict] | None = None
     code_snippets: list[str] | None = None
@@ -54,10 +56,15 @@ def graph_query_node(state: GraphState):
 
     return {"cypher_query": result.content.strip()}
 
-def plan_node(state: GraphState) -> GraphState:
+def make_plan_node(state: GraphState) -> GraphState:
     if not (state.intent and state.resolve):
         return state
     state.plan = make_plan(state.intent, state.resolve)
+    return state
+
+def run_plan_node(state: GraphState) -> GraphState:
+    if state.plan and state.intent and state.resolve:
+        state.plan_outputs = run_plan(plan=state.plan, intent=state.intent, resolved=state.resolve)
     return state
 
 def context_retrieval_node(state: GraphState):
@@ -103,7 +110,8 @@ builder.add_node("UserQuestion", user_question_node)
 builder.add_node("ParseIntent", parse_intent_node)
 builder.add_node("Router", router_node)
 builder.add_node("ResolveEntity", resolve_entity_node)
-builder.add_node("Plan", plan_node)
+builder.add_node("MakePlan", make_plan_node)
+builder.add_node("RunPlan", run_plan_node)
 # builder.add_node("GraphQuery", graph_query_node)
 builder.add_node("ContextRetrieval", context_retrieval_node)
 builder.add_node("AnswerGeneration", answer_generation_node)
@@ -112,8 +120,9 @@ builder.set_entry_point("UserQuestion")
 builder.add_edge("UserQuestion", "ParseIntent")
 builder.add_edge("ParseIntent", "Router")
 builder.add_edge("Router", "ResolveEntity")
-builder.add_edge("ResolveEntity", "Plan")
-builder.set_finish_point("Plan")
+builder.add_edge("ResolveEntity", "MakePlan")
+builder.add_edge("MakePlan", "RunPlan")
+builder.set_finish_point("RunPlan")
 # builder.add_edge("ResolveEntity", "GraphQuery")
 # builder.add_edge("GraphQuery", "ContextRetrieval" )
 # builder.add_edge("ContextRetrieval", "AnswerGeneration")

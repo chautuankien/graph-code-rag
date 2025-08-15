@@ -2,7 +2,7 @@
 import json
 import pytest
 
-from src.code_graph_rag.agent import planner as P
+from code_graph_rag.agent import plan_maker as P
 from src.code_graph_rag.agent.models import QueryIntent, ResolvedEntity
 
 @pytest.fixture(autouse=True)
