@@ -17,6 +17,8 @@ from src.code_graph_rag.models.edges import (
     BaseEdge, ContainsEdge, DefinesEdge, InheritsEdge, OverridesEdge,
     CallsEdge, DependsOnExternalEdge, ImportsEdge, NodeType
 )
+from src.code_graph_rag.utils.logging_setup import get_logger
+log = get_logger(__name__)
 
 
 def _escape(s: str) -> str:
@@ -209,6 +211,7 @@ def export_to_cypher(
         label, key_name, key_val = _label_key_name_val(node)
         registry[key_val] = (label, key_name, key_val)
         lines.append(_merge_node_stmt(label, key_name, key_val, _node_props(node)))
+    log.debug("export_to_cypher.registry=%s", registry)
 
     # 2) Edges.
     for edge in edges:

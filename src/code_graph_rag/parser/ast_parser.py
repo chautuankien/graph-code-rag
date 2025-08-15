@@ -189,6 +189,16 @@ class ASTParser():
         project_node = ProjectNode(name=self.project_root.name)
         self.nodes.append(project_node)
 
+        # 1️⃣ Pre-scan để seed toàn bộ module_symbols
+        for dirpath, _, filenames in os.walk(self.project_root):
+            current_path = Path(dirpath)
+            for file in filenames:
+                if file.endswith(".py"):
+                    rel_file_path = (current_path / file).relative_to(self.project_root)
+                    mod_qname = ".".join([self.project_root.name] + list(rel_file_path.with_suffix('').parts))
+                    self.module_symbols[mod_qname] = mod_qname
+
+        # 2️⃣ Parse structure + modules
         # Recursively traverse all directories and files in the project
         for dirpath, dirnames, filenames in os.walk(self.project_root):
             current_path = Path(dirpath)
@@ -297,9 +307,6 @@ class ASTParser():
                     # For Python source files, create a ModuleNode.
                     # Module qname = project_name + relative path without extension, with path separators replaced by dots.
                     mod_qname = ".".join([self.project_root.name] + list(rel_file_path.with_suffix('').parts))
-                    
-                    # Seed internal module registry for import resolution in later phases.
-                    self.module_symbols[mod_qname] = mod_qname
 
                     module_node = ModuleNode(
                         qualified_name=mod_qname,      # Unique qualified name
@@ -563,10 +570,23 @@ class ASTParser():
                     full_name = alias.name            # e.g. "os" or "mypkg.sub"
                     alias_name = alias.asname or alias.name  # Use alias if provided; otherwise the original name
                     # resolve target: is it internal?
-                    if full_name in self.module_symbols:
-                        target_qname = full_name     # Internal module already known by its qualified name
+
+                    # Try to resolve the imported name as an internal module.
+                    # Internal modules are stored in self.module_symbols with a project-prefixed qname
+                    # (e.g., "proj.pkg.b"), but the AST may give us an absolute package path
+                    # relative to the project root (e.g., "pkg.b").
+                    # 1) First, prepend project_name and check (matches most internal imports).
+                    # 2) If not found, check the raw full_name directly (covers edge cases where
+                    #    the module_symbols already contains it without prefix).
+                    # 3) Otherwise, treat as external/unresolved and keep the raw full_name.
+                    project_prefixed = f"{self.project_name}.{full_name}"
+                    if project_prefixed in self.module_symbols:
+                        target_qname = project_prefixed
+                    elif full_name in self.module_symbols:
+                        target_qname = full_name
                     else:
-                        target_qname = full_name     # External/unknown for now — keep raw dotted path
+                        target_qname = full_name
+
                     # record alias → target for later resolution
                     self.import_map[alias_name] = target_qname  # Map imported symbol/alias to its resolved target
                     # emit edge
@@ -603,11 +623,15 @@ class ASTParser():
                         import_name = f"{module_part}.{name_part}"
                         target_base = module_part
 
-                    # resolve target qname
-                    if import_name in self.module_symbols:
-                        target_qname = target_base   # Internal module/symbol already known
+                    # Normalize for internal match
+                    project_prefixed = f"{self.project_name}.{target_base}"
+                    if project_prefixed in self.module_symbols:
+                        target_qname = project_prefixed 
+                    elif target_base in self.module_symbols:
+                        target_qname = target_base 
                     else:
-                        target_qname = target_base   # External/unknown — keep normalized dotted path
+                        target_qname = target_base
+
                     # update import_map
                     self.import_map[alias_name] = target_qname  # Map alias/name → resolved target
                     # emit edge
