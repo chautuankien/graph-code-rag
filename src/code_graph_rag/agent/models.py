@@ -129,3 +129,24 @@ class ExplainPlan(BaseModel):
         d["limit"] = clamp(d.get("limit", 50), 1, 200)
         d["k"] = clamp(d.get("k", 3), 1, 5)
         return d
+
+class PlanExecutionResult(BaseModel):
+    """Unified output model for run_plan(), enriched with static metadata and snippet."""
+
+    step: str                      # Step name in ExplainPlan
+    label: str | None = None       # Node type (Function, Class, Module, File, ...)
+    id: str | None = None          # qualified_name or path
+    name: str | None = None        # Short name or path
+
+    # Phase 3.5 static metadata
+    docstring: str | None = None
+    signature: str | None = None
+    path: str | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+
+    # Code snippet
+    snippet: str | None = None
+
+    # For step-specific or adapter-specific extra fields
+    extra: dict[str, Any] = {}

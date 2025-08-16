@@ -56,6 +56,7 @@ def run_cypher_query(
             colnames.append(name)
 
         rows = cur.fetchall() or []
+        log.debug("run_cypher_query.rows: %s", rows)
         # build list[dict] row-by-row
         return [dict(zip(colnames, row)) for row in rows]
     except Exception as e:  # pragma: no cover (you can refine specific exceptions)
@@ -66,3 +67,31 @@ def run_cypher_query(
         finally:
             conn.close()
 
+def enrich_with_static_info(row: dict) -> dict:
+    """Attach static metadata from Memgraph to a raw adapter row.
+
+    Args:
+        row: Raw adapter output containing at least an 'id' field.
+
+    Returns:
+        The same dict with static metadata fields merged in.
+    """
+    node_id = row.get("id")
+    if not node_id:
+        return row
+
+    q = """
+    MATCH (n)
+    WHERE coalesce(n.qualified_name, n.path) = $id
+    RETURN n.docstring AS docstring,
+           n.signature AS signature,
+           n.path AS path,
+           n.start_line AS start_line,
+           n.end_line AS end_line
+    LIMIT 1
+    """
+    meta_rows = run_cypher_query(q, {"id": node_id})
+    # log.debug("enrich_with_static_info.meta_rows: %s", meta_rows)
+    if meta_rows:
+        row.update(meta_rows[0])
+    return row

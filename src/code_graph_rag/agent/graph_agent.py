@@ -15,6 +15,7 @@ from src.code_graph_rag.agent.models import ExplainPlan
 from src.code_graph_rag.agent.plan_runner import run_plan
 
 class GraphState(BaseModel):
+    repo_root: str | None = None  # Default repo root
     question: str | None = None
     intent: QueryIntent | None = None
     route: str | None = None
@@ -64,7 +65,7 @@ def make_plan_node(state: GraphState) -> GraphState:
 
 def run_plan_node(state: GraphState) -> GraphState:
     if state.plan and state.intent and state.resolve:
-        state.plan_outputs = run_plan(plan=state.plan, intent=state.intent, resolved=state.resolve)
+        state.plan_outputs = run_plan(plan=state.plan, intent=state.intent, resolved=state.resolve, repo_root=state.repo_root)
     return state
 
 def context_retrieval_node(state: GraphState):
