@@ -76,7 +76,7 @@ def load_repo_into_memgraph(tmp_path: Path) -> Callable[[dict[str, str], str | N
           dataset needs them, turn it on from here.
     """
     def _loader(files: dict[str, str], project_name: str | None = None) -> Path:
-        repo_dir = tmp_path / "repo"
+        repo_dir = tmp_path / (project_name or "repo")
         # Write files to the repo dir
         for rel, content in files.items():
             p = repo_dir / rel

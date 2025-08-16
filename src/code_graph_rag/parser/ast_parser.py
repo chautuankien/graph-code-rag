@@ -323,7 +323,7 @@ class ASTParser():
                     ))
 
                     # Parse the module to extract semantic elements (classes, functions, imports, calls, etc.).
-                    self._parse_module(file_path, mod_qname)
+                    self._parse_module(rel_file_path, mod_qname)
                 else:
                     # For non-Python files, create a FileNode with its relative path as identifier.
                     file_node = FileNode(
@@ -516,7 +516,7 @@ class ASTParser():
                 already_emitted.add(node.name)
 
     def _parse_module(self, module_path: Path, mod_qname: str):
-        with open(module_path, "r", encoding="utf-8") as f:
+        with open(self.project_root / module_path, "r", encoding="utf-8") as f:
             source = f.read()
 
         try: 
@@ -532,10 +532,10 @@ class ASTParser():
 
         for node in ast.iter_child_nodes(tree):
             if isinstance(node, ast.ClassDef):
-                self._handle_class(node, mod_qname, context_stack)
+                self._handle_class(node, mod_qname, module_path, context_stack)
             elif isinstance(node, ast.FunctionDef):
-                self._handle_function(node, mod_qname, context_stack)
-    
+                self._handle_function(node, mod_qname, module_path, context_stack)
+
     def _handle_imports(self, tree: ast.AST, mod_qname: str):
         """
         Parse top-level import statements in a module and emit IMPORTS edges.
@@ -645,7 +645,7 @@ class ASTParser():
                     # Record external use for this module
                     self._record_external_use(mod_qname, module_part, is_relative=is_rel)
 
-    def _handle_class(self, node: ast.ClassDef, mod_qname: str, context_stack: list):
+    def _handle_class(self, node: ast.ClassDef, mod_qname: str, file_path: str, context_stack: list):
         """
         Register a class definition, emit structural/semantic edges, and enqueue its internals.
 
@@ -685,6 +685,7 @@ class ASTParser():
         class_node = ClassNode(
             name=node.name,
             qualified_name=qualified_name,
+            path=str(file_path),
             decorators=decorators,
             start_line=node.lineno,
             end_line=node.end_lineno if hasattr(node, "end_lineno") else node.lineno,
@@ -706,10 +707,10 @@ class ASTParser():
         context_stack.append("class")   # Enter class context so functions become methods
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.FunctionDef):
-                self._handle_function(child, qualified_name, context_stack)
+                self._handle_function(child, qualified_name, file_path, context_stack)
         context_stack.pop()             # Exit class context
     
-    def _handle_function(self, node: ast.FunctionDef, mod_or_class_qname: str, context_stack: list):
+    def _handle_function(self, node: ast.FunctionDef, mod_or_class_qname: str, file_path: str, context_stack: list):
         """
         Register a function or method, emit DEF edges, collect calls, and recurse into nested defs.
 
@@ -753,6 +754,7 @@ class ASTParser():
         func_obj = func_node(
             name=node.name,
             qualified_name=qualified_name,
+            path=str(file_path),
             decorators=decorators,
             start_line=node.lineno,
             end_line=node.end_lineno if hasattr(node, "end_lineno") else node.lineno,
@@ -788,7 +790,7 @@ class ASTParser():
         context_stack.append("function")    # Enter function context for correct nesting semantics
         for child in node.body:
             if isinstance(child, ast.FunctionDef):
-                self._handle_function(child, qualified_name, context_stack)
+                self._handle_function(child, qualified_name, file_path, context_stack)
         context_stack.pop()                 # Exit function context
     
     def _handle_call(self, node: ast.Call, current_class_or_func_qname: str, is_method: bool):

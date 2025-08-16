@@ -26,6 +26,7 @@ class ModuleNode(BaseNode):
 class ClassNode(BaseNode):
     """Represents a class definition."""
     qualified_name: str
+    path: str       # relative file path within project
     decorators: list[str]
     start_line: int
     end_line: int
@@ -35,6 +36,7 @@ class ClassNode(BaseNode):
 class FunctionNode(BaseNode):
     """Represents a standalone or nested function."""
     qualified_name: str
+    path: str       # relative file path within project
     decorators: list[str]
     start_line: int
     end_line: int
