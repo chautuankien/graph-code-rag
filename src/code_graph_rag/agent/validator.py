@@ -184,7 +184,7 @@ def make_retry_cb(
     steps_by_name = {s.name: s for s in plan_steps}
 
     def _run_step(step: PlanStep) -> list[PlanExecutionResult]:
-        # Chạy 1 step với enrich như bình thường để trả về PlanExecutionResult.
+        # Run a single step with enrichment as usual to return PlanExecutionResult.
         return runner([step], intent, resolved, repo_root)
 
     def retry_cb(step_name: str, strategy: str) -> list[PlanExecutionResult]:
@@ -247,7 +247,7 @@ def make_retry_cb(
                 return _run_step(fb)
 
             if step.name == "MODULES_DEPENDING_ON_EXTERNAL":
-                # Thử alias khác của package trước khi bỏ cuộc
+                # Try alternative aliases of the package before giving up
                 pkg = step.params.get("package") or intent.mention or ""
                 candidates = {pkg.lower(), _normalize_pkg(pkg)}
                 out: list[PlanExecutionResult] = []

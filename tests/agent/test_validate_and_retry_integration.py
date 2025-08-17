@@ -71,7 +71,7 @@ def test_01_validate_and_retry_node_happy_path(load_repo_into_memgraph):
     log.debug("test_validate_and_retry_node_happy_path.intent: %s", intent)
     log.debug("test_validate_and_retry_node_happy_path.resolved: %s", resolved)
 
-    # 3) Make a deterministic plan (không phụ thuộc LLM)
+    # 3) Make a deterministic plan (not dependent on LLM)
     #    - META: enrich static info of the function
     #    - CALLEES_TOP: top callees from CALLS edges
     plan = ExplainPlan(
@@ -115,7 +115,7 @@ def test_01_validate_and_retry_node_happy_path(load_repo_into_memgraph):
     for row in validated:
         assert row.label, "each row must have a label"
         assert row.id, "each row must have an id"
-        # snippet/docstring may be optional, đừng assert cứng
+        # snippet/docstring may be optional, don't assert strictly
 
     report = getattr(new_state, "validation_report", None)
     if report:

@@ -70,12 +70,12 @@ def validate_and_retry_node(state: GraphState) -> GraphState:
         return state
     outs = state.plan_outputs or []
 
-    # 1) Tập hợp required steps từ ExplainPlan
+    # 1) Collect required steps from ExplainPlan
     required_steps = {s.name for s in state.plan.steps if s.required}
 
-    # 2) Tạo runner wrapper cho retry_cb
+    # 2) Create a runner wrapper for retry_cb
     def _runner(steps: list[PlanStep], intent: QueryIntent, resolved: ResolvedEntity, repo_root: str | None):
-        # NOTE: dùng run_plan cho 1 hoặc nhiều step bằng cách tạo ExplainPlan tạm
+        # NOTE: use run_plan for 1 or more steps by creating a temporary ExplainPlan
         tmp = ExplainPlan(steps=steps, knobs=state.plan.knobs if state.plan else {})
         return run_plan(plan=tmp, intent=intent, resolved=resolved, repo_root=repo_root or "")
 
@@ -92,7 +92,7 @@ def validate_and_retry_node(state: GraphState) -> GraphState:
         rows=outs,
         required_steps=required_steps,
         retry_cb=retry_cb,
-        max_retries=2,  # Tối đa 2 lần retry
+        max_retries=2,  # Maximum 2 retries
     )
 
     state.validated_rows = cleaned
