@@ -5,14 +5,21 @@ from langchain.prompts import ChatPromptTemplate
 
 from pydantic import BaseModel
 
-from src.code_graph_rag.agent.llm import get_cypher_generate_model
+from src.code_graph_rag.agent.models import (
+    QueryIntent, Route, 
+    ResolvedEntity, 
+    ExplainPlan, PlanStep,
+    PlanExecutionResult, ValidationReport
+)
 from src.code_graph_rag.agent.utils.utils import run_cypher_query
 from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
 from src.code_graph_rag.agent.resolver import resolve_entity
-from src.code_graph_rag.agent.models import QueryIntent, Route,  ResolvedEntity
 from src.code_graph_rag.agent.plan_maker import make_plan
-from src.code_graph_rag.agent.models import ExplainPlan
 from src.code_graph_rag.agent.plan_runner import run_plan
+from src.code_graph_rag.agent.validator import validate_and_retry, make_retry_cb
+
+from src.code_graph_rag.utils.logging_setup import get_logger
+log = get_logger(__name__)
 
 class GraphState(BaseModel):
     repo_root: str | None = None  # Default repo root
@@ -21,7 +28,9 @@ class GraphState(BaseModel):
     route: str | None = None
     resolve: ResolvedEntity | None = None
     plan: ExplainPlan | None = None
-    plan_outputs: dict[str, list[dict]] | None = None
+    plan_outputs: list[PlanExecutionResult] | None = None
+    validated_rows: list[PlanExecutionResult] | None = None
+    validation_report: ValidationReport | None = None
     # cypher_query: str | None = None
     # matched_node: list[dict] | None = None
     code_snippets: list[str] | None = None
@@ -31,7 +40,7 @@ def user_question_node(state: GraphState):
     return {"question": state.question}
 
 def parse_intent_node(state: GraphState) -> GraphState:
-    intent = llm_parse_intent(state.question or "")
+    intent = llm_parse_intent(state.question or "", provider="nvidia")
     state.intent = intent
     return state
 
@@ -45,27 +54,49 @@ def resolve_entity_node(state: GraphState) -> GraphState:
         state.resolve = resolve_entity(state.intent)
     return state
 
-def graph_query_node(state: GraphState):
-    query_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a codebase assistant. Your job is to translate user questions into Cypher queries for a code knowledge graph."),
-        ("user", "Question: {question}\nReturn only the Cypher query")
-    ])
-
-    model = get_cypher_generate_model()
-    chain = query_prompt | model
-    result = chain.invoke({"question": state.question})
-
-    return {"cypher_query": result.content.strip()}
-
 def make_plan_node(state: GraphState) -> GraphState:
     if not (state.intent and state.resolve):
         return state
-    state.plan = make_plan(state.intent, state.resolve)
+    state.plan = make_plan(state.intent, state.resolve, provider="nvidia")
     return state
 
 def run_plan_node(state: GraphState) -> GraphState:
     if state.plan and state.intent and state.resolve:
         state.plan_outputs = run_plan(plan=state.plan, intent=state.intent, resolved=state.resolve, repo_root=state.repo_root)
+    return state
+
+def validate_and_retry_node(state: GraphState) -> GraphState:
+    if not (state.plan_outputs and state.intent and state.resolve):
+        return state
+    outs = state.plan_outputs or []
+
+    # 1) Tập hợp required steps từ ExplainPlan
+    required_steps = {s.name for s in state.plan.steps if s.required}
+
+    # 2) Tạo runner wrapper cho retry_cb
+    def _runner(steps: list[PlanStep], intent: QueryIntent, resolved: ResolvedEntity, repo_root: str | None):
+        # NOTE: dùng run_plan cho 1 hoặc nhiều step bằng cách tạo ExplainPlan tạm
+        tmp = ExplainPlan(steps=steps, knobs=state.plan.knobs if state.plan else {})
+        return run_plan(plan=tmp, intent=intent, resolved=resolved, repo_root=repo_root or "")
+
+    retry_cb = make_retry_cb(
+        plan_steps=state.plan.steps,
+        runner=_runner,
+        intent=state.intent,
+        resolved=state.resolve,
+        repo_root=state.repo_root,
+    )
+
+    # 3) Validate + Retry
+    cleaned, report = validate_and_retry(
+        rows=outs,
+        required_steps=required_steps,
+        retry_cb=retry_cb,
+        max_retries=2,  # Tối đa 2 lần retry
+    )
+
+    state.validated_rows = cleaned
+    state.validation_report = report
     return state
 
 def context_retrieval_node(state: GraphState):
@@ -113,7 +144,7 @@ builder.add_node("Router", router_node)
 builder.add_node("ResolveEntity", resolve_entity_node)
 builder.add_node("MakePlan", make_plan_node)
 builder.add_node("RunPlan", run_plan_node)
-# builder.add_node("GraphQuery", graph_query_node)
+builder.add_node("ValidateAndRetry", validate_and_retry_node)
 builder.add_node("ContextRetrieval", context_retrieval_node)
 builder.add_node("AnswerGeneration", answer_generation_node)
 
@@ -123,11 +154,8 @@ builder.add_edge("ParseIntent", "Router")
 builder.add_edge("Router", "ResolveEntity")
 builder.add_edge("ResolveEntity", "MakePlan")
 builder.add_edge("MakePlan", "RunPlan")
-builder.set_finish_point("RunPlan")
-# builder.add_edge("ResolveEntity", "GraphQuery")
-# builder.add_edge("GraphQuery", "ContextRetrieval" )
-# builder.add_edge("ContextRetrieval", "AnswerGeneration")
-# builder.set_finish_point("AnswerGeneration")
+builder.add_edge("RunPlan", "ValidateAndRetry")
+builder.set_finish_point("ValidateAndRetry")
 
 graph = builder.compile()
 
