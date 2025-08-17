@@ -150,3 +150,9 @@ class PlanExecutionResult(BaseModel):
 
     # For step-specific or adapter-specific extra fields
     extra: dict[str, Any] = {}
+
+class ValidationReport(BaseModel):
+    kept: int = 0
+    dropped: int = 0
+    reasons: dict[str, int] = Field(default_factory=dict)
+    issues: list[str] = Field(default_factory=list)

@@ -21,7 +21,7 @@ def load_code_slice(path: str, start: int, end: int,
         UTF-8 text snippet (with replacement for undecodable bytes).
     """
     if not repo_root:
-        repo_root = Path("src")  # default: repo's source folder
+        repo_root = Path.cwd()  # default: repo's source folder
     abs_path = repo_root / Path(path)
     if not abs_path.exists():
         return ""

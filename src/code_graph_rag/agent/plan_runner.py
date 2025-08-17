@@ -57,7 +57,7 @@ def run_plan(*, plan: ExplainPlan, intent: QueryIntent, resolved: ResolvedEntity
                 outputs.append(PlanExecutionResult(step=step.name, **row))
                 
             if step.required and not rows:
-                raise RuntimeError(f"Required step produced no rows: {name}")
+                raise PlanExecutionError(f"Required step produced no rows: {name}")
         except Exception as e:
             log.error("adapter.failed name=%s err=%s", name, e)
             if step.required:

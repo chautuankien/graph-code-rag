@@ -19,6 +19,7 @@ dependencies = [
     "pymgclient (>=1.4.0,<2.0.0)",
     "streamlit (>=1.48.0,<2.0.0)",
     "pytest (>=8.4.1,<9.0.0)",
+    "langchain-nvidia-ai-endpoints (>=0.3.16,<0.4.0)",
 ]
 
 [tool.poetry]
@@ -32,6 +33,9 @@ pythonpath = ["."]
 testpaths = ["tests"]
 log_cli = true
 log_cli_level = "DEBUG"
+markers = [
+  "integration: mark tests as integration (run with -m 'integration')"
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
