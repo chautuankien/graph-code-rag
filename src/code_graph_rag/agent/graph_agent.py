@@ -1,22 +1,22 @@
 from langgraph.graph import StateGraph
-from langchain_core.runnables import Runnable
-
-from langchain.prompts import ChatPromptTemplate
 
 from pydantic import BaseModel
+from typing import Any
 
 from src.code_graph_rag.agent.models import (
     QueryIntent, Route, 
     ResolvedEntity, 
     ExplainPlan, PlanStep,
-    PlanExecutionResult, ValidationReport
+    PlanExecutionResult, ValidationReport,
+    SynthesisOutput
 )
-from src.code_graph_rag.agent.utils.utils import run_cypher_query
+
 from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
 from src.code_graph_rag.agent.resolver import resolve_entity
 from src.code_graph_rag.agent.plan_maker import make_plan
 from src.code_graph_rag.agent.plan_runner import run_plan
 from src.code_graph_rag.agent.validator import validate_and_retry, make_retry_cb
+from src.code_graph_rag.agent.synthesis.synthesis_engine import SynthesisEngine, create_synthesis_engine
 
 from src.code_graph_rag.utils.logging_setup import get_logger
 log = get_logger(__name__)
@@ -24,15 +24,20 @@ log = get_logger(__name__)
 class GraphState(BaseModel):
     repo_root: str | None = None  # Default repo root
     question: str | None = None
+
     intent: QueryIntent | None = None
     route: str | None = None
+
     resolve: ResolvedEntity | None = None
     plan: ExplainPlan | None = None
+
     plan_outputs: list[PlanExecutionResult] | None = None
     validated_rows: list[PlanExecutionResult] | None = None
     validation_report: ValidationReport | None = None
-    # cypher_query: str | None = None
-    # matched_node: list[dict] | None = None
+
+    synthesis_output: SynthesisOutput | None = None
+    synthesis_stats: dict[str, Any] | None = None  # Performance tracking
+
     code_snippets: list[str] | None = None
     answer: str | None = None
 
@@ -57,7 +62,7 @@ def resolve_entity_node(state: GraphState) -> GraphState:
 def make_plan_node(state: GraphState) -> GraphState:
     if not (state.intent and state.resolve):
         return state
-    state.plan = make_plan(state.intent, state.resolve, provider="nvidia")
+    state.plan = make_plan(state.intent, state.resolve, provider="openai")
     return state
 
 def run_plan_node(state: GraphState) -> GraphState:
@@ -99,42 +104,60 @@ def validate_and_retry_node(state: GraphState) -> GraphState:
     state.validation_report = report
     return state
 
-def context_retrieval_node(state: GraphState):
-    if not state.plan:
-        return {"matched_node": [], "code_snippets": []}
+def synthesis_node(state: GraphState) -> GraphState:
+    """
+    Synthesis node: convert validated evidence → structured JSON.
     
-    results = run_cypher_query(state.cypher_query)
-
-    # Lấy nội dung code nếu có field "source" hoặc "code"
-    snippets = []
-    for r in results:
-        for v in r.values():
-            if isinstance(v, dict):
-                code = v.get("source") or v.get("code")
-                if code:
-                    snippets.append(code)
-    return {
-        "matched_nodes": results,
-        "code_snippets": snippets
-    }
-
-def answer_generation_node(state: GraphState):
-    answer_prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant that answers developer questions about a codebase using the given context."),
-        ("user", "Question: {question}\nContext:\n{context}\n\nAnswer:"),
-    ])
+    Uses SynthesisEngine to orchestrate the full synthesis pipeline.
+    Handles errors gracefully và always returns valid SynthesisOutput.
+    """
+    if not (state.validated_rows and state.intent):
+        log.warning("synthesis_node: Missing validated_rows or intent")
+        return state
     
-    model = get_cypher_generate_model()
-    chain = answer_prompt | model
+    try:
+        # Create synthesis engine
+        engine = create_synthesis_engine(
+            provider="nvidia",  # Or get from config
+            max_evidence_tokens=3000,
+            temperature=0.0
+        )
+        
+        # Run synthesis
+        synthesis_output = engine.synthesize(
+            intent=state.intent,
+            validated_results=state.validated_rows
+        )
+        
+        state.synthesis_output = synthesis_output
+        state.synthesis_stats = engine.get_stats()
+        
+        log.info(f"synthesis_node: Success - processing_time={synthesis_output.processing_time_ms}ms, "
+                f"confidence={synthesis_output.confidence:.2f}")
 
-    context = "\n---\n".join(state.code_snippets or [])
-
-    result = chain.invoke({
-        "question": state.question,
-        "context": context
-    })
-
-    return {"answer": result.content.strip()}
+        return state
+        
+    except Exception as e:
+        log.error(f"synthesis_node: Failed - {e}")
+        
+        # Create fallback synthesis output
+        fallback_answer = {
+            "vi": f"Không thể phân tích chi tiết. Tìm thấy {len(state.validated_rows)} mục evidence.",
+            "en": f"Unable to complete detailed analysis. Found {len(state.validated_rows)} evidence items."
+        }
+        
+        state.synthesis_output = SynthesisOutput(
+            action=state.intent.action,
+            language=state.intent.language,
+            answer=fallback_answer[state.intent.language.value],
+            items=[],
+            citations=[],
+            confidence=0.1,
+            evidence_count=len(state.validated_rows),
+            notes=f"Synthesis failed: {str(e)[:100]}..."
+        )
+    
+        return state
 
 builder = StateGraph(GraphState)
 
@@ -145,8 +168,7 @@ builder.add_node("ResolveEntity", resolve_entity_node)
 builder.add_node("MakePlan", make_plan_node)
 builder.add_node("RunPlan", run_plan_node)
 builder.add_node("ValidateAndRetry", validate_and_retry_node)
-builder.add_node("ContextRetrieval", context_retrieval_node)
-builder.add_node("AnswerGeneration", answer_generation_node)
+builder.add_node("Synthesis", synthesis_node)
 
 builder.set_entry_point("UserQuestion")
 builder.add_edge("UserQuestion", "ParseIntent")
@@ -155,7 +177,8 @@ builder.add_edge("Router", "ResolveEntity")
 builder.add_edge("ResolveEntity", "MakePlan")
 builder.add_edge("MakePlan", "RunPlan")
 builder.add_edge("RunPlan", "ValidateAndRetry")
-builder.set_finish_point("ValidateAndRetry")
+builder.add_edge("ValidateAndRetry", "Synthesis")
+builder.set_finish_point("Synthesis")
 
 graph = builder.compile()
 

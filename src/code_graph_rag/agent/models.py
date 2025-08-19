@@ -88,7 +88,7 @@ class ResolvedEntity(BaseModel):
 
 # 1) Allow-list step names (Literal keeps planner outputs type-safe)
 StepName = Literal[
-    "META", "CALLERS_TOP", "CALLEES_TOP", "IMPORTS", "NEIGHBORHOOD", "PATH",
+    "META", "CALLERS_TOP", "CALLEES_TOP", "IMPORTS", "NEIGHBORHOOD",
     "NODE_META", "METHODS_OF_CLASS", "INHERITS_DIRECT", "OVERRIDDEN_BY",
     "ENTRY_FUNCS_BY_KEYWORD", "MODULE_OF_SYMBOL", "MODULES_DEPENDING_ON_EXTERNAL",
     "PROJECT_EXTERNALS", "STATIC_ENRICH"

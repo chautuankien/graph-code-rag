@@ -166,7 +166,7 @@ def make_plan(intent: QueryIntent, resolved: ResolvedEntity, *, provider: str = 
         payload=build_payload(),
         schema=ExplainPlan,
         provider=provider,
-        max_retries=1,
+        max_retries=2,
         max_tokens=2000,
     )
     log.debug("make_plan.raw_plan: %s", plan.model_dump())
