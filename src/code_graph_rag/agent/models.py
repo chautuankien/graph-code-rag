@@ -156,3 +156,10 @@ class ValidationReport(BaseModel):
     dropped: int = 0
     reasons: dict[str, int] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
+
+class SynthesisOutput(BaseModel):
+    action: str
+    answer: str                      # Human-readable summary
+    items: list[dict[str, Any]]     # Structured results
+    evidence_count: int              # How many evidence items used
+    confidence: float = Field(ge=0.0, le=1.0, default=0.8)

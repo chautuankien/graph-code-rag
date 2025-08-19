@@ -9,7 +9,8 @@ from src.code_graph_rag.agent.models import (
     QueryIntent, Route, 
     ResolvedEntity, 
     ExplainPlan, PlanStep,
-    PlanExecutionResult, ValidationReport
+    PlanExecutionResult, ValidationReport,
+    SynthesisOutput
 )
 from src.code_graph_rag.agent.utils.utils import run_cypher_query
 from src.code_graph_rag.agent.intent import llm_parse_intent, decide_route
@@ -17,6 +18,7 @@ from src.code_graph_rag.agent.resolver import resolve_entity
 from src.code_graph_rag.agent.plan_maker import make_plan
 from src.code_graph_rag.agent.plan_runner import run_plan
 from src.code_graph_rag.agent.validator import validate_and_retry, make_retry_cb
+from src.code_graph_rag.agent.synthesis import synthesize
 
 from src.code_graph_rag.utils.logging_setup import get_logger
 log = get_logger(__name__)
@@ -27,12 +29,15 @@ class GraphState(BaseModel):
     intent: QueryIntent | None = None
     route: str | None = None
     resolve: ResolvedEntity | None = None
+
     plan: ExplainPlan | None = None
     plan_outputs: list[PlanExecutionResult] | None = None
+
     validated_rows: list[PlanExecutionResult] | None = None
     validation_report: ValidationReport | None = None
-    # cypher_query: str | None = None
-    # matched_node: list[dict] | None = None
+
+    synthesis_output: SynthesisOutput | None = None
+
     code_snippets: list[str] | None = None
     answer: str | None = None
 
@@ -57,7 +62,7 @@ def resolve_entity_node(state: GraphState) -> GraphState:
 def make_plan_node(state: GraphState) -> GraphState:
     if not (state.intent and state.resolve):
         return state
-    state.plan = make_plan(state.intent, state.resolve, provider="nvidia")
+    state.plan = make_plan(state.intent, state.resolve, provider="openai")
     return state
 
 def run_plan_node(state: GraphState) -> GraphState:
@@ -98,6 +103,41 @@ def validate_and_retry_node(state: GraphState) -> GraphState:
     state.validated_rows = cleaned
     state.validation_report = report
     return state
+
+def synthesis_node(state: GraphState) -> GraphState:
+    if not (state.validated_rows and state.intent):
+        log.warning("simple_synthesis_node: Missing validated_rows or intent")
+        return state
+    
+    try:
+
+        output = synthesize(
+            intent=state.intent,
+            results=state.validated_rows,
+            provider="nvidia" 
+        )
+        
+        state.synthesis_output = output
+
+        log.info(f"simple_synthesis_node: Success - evidence_count={output.evidence_count}, "
+                 f"confidence={output.confidence:.2f}")
+
+        return state
+        
+    except Exception as e:
+        log.error(f"simple_synthesis_node: Failed - {e}")
+        
+        # Create minimal fallback
+        fallback_output = SynthesisOutput(
+            action=state.intent.action.value if state.intent else "unknown",
+            answer=f"Synthesis failed: {str(e)}",
+            items=[],
+            evidence_count=len(state.validated_rows) if state.validated_rows else 0,
+            confidence=0.1
+        )
+        
+        state.simple_synthesis_output = fallback_output
+        return state
 
 def context_retrieval_node(state: GraphState):
     if not state.plan:
@@ -145,8 +185,7 @@ builder.add_node("ResolveEntity", resolve_entity_node)
 builder.add_node("MakePlan", make_plan_node)
 builder.add_node("RunPlan", run_plan_node)
 builder.add_node("ValidateAndRetry", validate_and_retry_node)
-builder.add_node("ContextRetrieval", context_retrieval_node)
-builder.add_node("AnswerGeneration", answer_generation_node)
+builder.add_node("Synthesis", synthesis_node)
 
 builder.set_entry_point("UserQuestion")
 builder.add_edge("UserQuestion", "ParseIntent")
@@ -155,7 +194,8 @@ builder.add_edge("Router", "ResolveEntity")
 builder.add_edge("ResolveEntity", "MakePlan")
 builder.add_edge("MakePlan", "RunPlan")
 builder.add_edge("RunPlan", "ValidateAndRetry")
-builder.set_finish_point("ValidateAndRetry")
+builder.add_edge("ValidateAndRetry", "Synthesis")
+builder.set_finish_point("Synthesis")
 
 graph = builder.compile()
 

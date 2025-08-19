@@ -39,4 +39,4 @@ def run_agent(question: str) -> None:
 
 if __name__ == "__main__":
     # build_knowledge_graph()
-    run_agent("Who calls foo?")
+    run_agent("Who calls load_data()?")
