@@ -523,7 +523,7 @@ def entry_funcs_by_keyword_adapter(*, step: PlanStep, intent: QueryIntent, resol
     limit = _coerce_int(step.params.get("limit", intent.limit), 1, 200, 50)
     kwl = kw.lower()
     use_contains = len(kwl) >= 3
-    log.debug("entry_funcs_by_keyword_adapter: kw=%s kwl=%s limit=%s", kw, kwl, limit)
+    log.debug("entry_funcs_by_keyword_adapter: kw=%s kwl=%s limit=%s use_contains=%s", kw, kwl, limit, use_contains)
 
     """
     This runs a Cypher query that:
