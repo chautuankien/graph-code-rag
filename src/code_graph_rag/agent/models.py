@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
@@ -16,7 +16,10 @@ class Action(str, Enum):
     trace_flow = "trace_flow"
     impact_analysis = "impact_analysis"
 
-Language = Literal["vi", "en"]
+class Language(str, Enum):
+    """UI/prompt language for the agent."""
+    vi = "vi"
+    en = "en"
 
 class QueryIntent(BaseModel):
     """Normalized user intent for routing.
@@ -156,3 +159,88 @@ class ValidationReport(BaseModel):
     dropped: int = 0
     reasons: dict[str, int] = Field(default_factory=dict)
     issues: list[str] = Field(default_factory=list)
+
+
+# Base item types cho các action khác nhau
+class EntityReference(BaseModel):
+    """Reference to a graph entity (Function, Class, etc.)"""
+    label: str  # "Function", "Method", "Class", etc.
+    id: str     # qualified_name hoặc path
+    name: str   # display name
+
+class CallerCalleeItem(BaseModel):
+    """Item for list_callers/list_callees actions"""
+    caller: EntityReference
+    callee: EntityReference
+    why: str  # explanation of relationship
+    call_count: int | None = None  # optional: frequency
+
+class RelationshipItem(BaseModel):
+    """Item for imports/inherits_tree/overrides/depends_external"""
+    source: EntityReference
+    relationship: str  # "IMPORTS", "INHERITS", "OVERRIDES", etc.
+    target: EntityReference
+    why: str
+    details: dict[str, Any] = {}  # extra metadata
+
+class ExplainFunctionItem(BaseModel):
+    """Item for explain_function action"""
+    summary: str
+    purpose: str
+    inputs: list[str]
+    outputs: str | None = None
+    side_effects: list[str] = []
+    exceptions: list[str] = []
+    complexity_hint: str | None = None
+    snippet_excerpt: str | None = None
+    dependencies: list[EntityReference] = []
+
+class FlowStepItem(BaseModel):
+    """Single step in trace_flow/impact_analysis"""
+    step_id: str
+    entity: EntityReference
+    operation: str  # "calls", "defines", "imports", etc.
+    why: str
+    order: int
+
+class FlowPathItem(BaseModel):
+    """Complete path for trace_flow/impact_analysis"""
+    path_id: str
+    steps: list[FlowStepItem]
+    confidence: float  # 0.0 - 1.0
+    description: str
+
+# Union type cho tất cả item types
+SynthesisItem = Union[
+    CallerCalleeItem,
+    RelationshipItem, 
+    ExplainFunctionItem,
+    FlowPathItem
+]
+
+class Citation(BaseModel):
+    """Reference to evidence used in synthesis"""
+    label: str
+    id: str
+    snippet_lines: tuple[int, int] | None = None  # (start, end) if applicable
+
+class SynthesisOutput(BaseModel):
+    """Main output model for structured synthesis"""
+    action: Action
+    language: Language
+    answer: str  # concise markdown-safe summary
+    items: list[dict[str, Any]]  # structured per action (will validate separately)
+    citations: list[Citation]
+    notes: str | None = None  # warnings, limitations, etc.
+    confidence: float = 1.0  # overall confidence in results
+    
+    # Metadata
+    evidence_count: int = 0
+    processing_time_ms: int | None = None
+
+class SynthesisError(BaseModel):
+    """Error information when synthesis fails"""
+    error_type: str  # "parse_error", "validation_error", "llm_error"
+    message: str
+    raw_response: str | None = None
+    repair_attempted: bool = False

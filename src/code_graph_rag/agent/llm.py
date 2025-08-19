@@ -64,7 +64,7 @@ def get_json_llm(
         return ChatNVIDIA(
             model=model, 
             temperature=temperature,
-            max_tokens=max_tokens, 
+            max_completion_tokens=max_tokens, 
             model_kwargs=model_kwargs if model_kwargs else None
         )
     
