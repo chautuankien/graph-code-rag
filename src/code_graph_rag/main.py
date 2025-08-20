@@ -1,75 +1,42 @@
 from pathlib import Path
-import matplotlib.pyplot as plt
-import networkx as nx
+import uuid
 
-from src.code_graph_rag.utils.file_utils import walk_codebase
-from src.code_graph_rag.parser.ast_parser import ASTParser
-from src.code_graph_rag.graph.graph_builder import CodeGraphBuilder
-from src.code_graph_rag.graph.exporter import export_to_cypher
+from src.code_graph_rag.utils.logging_setup import setup_logging, pipeline_context, set_corr_id, get_logger
+from src.code_graph_rag.pipeline.build_knowledge_graph import build_knowledge_graph_and_insert_db
+from src.code_graph_rag.agent.graph_agent import graph, GraphState
 
-def parser():
-    repo_path = Path("tests/sample_repo")
-    structure = walk_codebase(repo_path)
+Path("logs").mkdir(parents=True, exist_ok=True)
+setup_logging(level="DEBUG", log_file="logs/app.log", force=True)
 
-    for node_type, nodes in structure.items():
-        print(f"\n== {node_type.upper()} ==")
-        for node in nodes:
-            print(node)
+def build_knowledge_graph() -> None:
+    repo_path = Path("sample_repo")
+    export_path = "graph_export.cypherl"
+    with pipeline_context("build-kg") as ctx:
+        log = get_logger(__name__)
+        log.info("Start build graph")
 
-def test_ast():
-    module_path = Path("tests/sample_repo/data_loader.py")
-    parser = ASTParser(module_path, module_id="data_loader.py")
-    result = parser.parse()
+        build_knowledge_graph_and_insert_db(
+            repo_path=repo_path,
+            export_path=export_path,
+            bootstrap_schema=False,
+            bootstrap_file="db_bootstrap.cypher",
+        )
 
-    for node in result["nodes"]:
-        print("NODE:", node)
+        log.info("Graph built successfully")
 
-    for edge in result["edges"]:
-        print("EDGE:", edge)
+def run_agent(question: str) -> None:
+    # Nếu có request id truyền từ caller, set_corr_id(req_id). Nếu không thì tạo.
+    set_corr_id(str(uuid.uuid4())[:8])
 
-def visualize_graph():
-    repo_path = Path("tests/sample_repo")
-    builder = CodeGraphBuilder(repo_path=repo_path)
-    graph = builder.build()
+    with pipeline_context("agent") as ctx:
+        log = get_logger(__name__)
+        log.info(f"Agent received question: {question}")
 
-    pos = nx.spring_layout(graph, seed=42)
-
-    node_colors = []
-    for _, data in graph.nodes(data=True):
-        node_type = data.get("type", "")
-        if node_type == "Function":
-            node_colors.append("lightblue")
-        elif node_type == "Class":
-            node_colors.append("orange")
-        elif node_type == "Method":
-            node_colors.append("violet")
-        elif node_type == "Module":
-            node_colors.append("green")
-        elif node_type == "ExternalPackage":
-            node_colors.append("gray")
-        else:
-            node_colors.append("lightgray")
-    
-    edge_labels = nx.get_edge_attributes(graph, "type")
-
-    nx.draw(graph, pos, with_labels=True, node_size=800, node_color=node_colors, font_size=8)
-    nx.draw_networkx_edge_labels(graph, pos, edge_labels=edge_labels, font_size=6)
-
-    plt.title("Code Knowledge Graph")
-    plt.tight_layout()
-    plt.show()
-
-def export():
-    repo_path = Path("tests/sample_repo")
-    builder = CodeGraphBuilder(repo_path)
-    graph = builder.build()
-
-    cypher_path = Path("graph_export.cypherl")
-    export_to_cypher(graph, cypher_path)
+        state = GraphState(question=question)
+        response = graph.invoke(state)
+        response = GraphState.model_validate(response)
+        log.info(f"Agent response: {response}")
 
 if __name__ == "__main__":
-    
-    # parser()
-    # test_ast()
-    visualize_graph()
-    # export()
+    # build_knowledge_graph()
+    run_agent("Who calls foo?")
